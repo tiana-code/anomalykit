@@ -6,9 +6,15 @@ that is anomalous in ECO mode may be perfectly normal at FULL_SPEED.
 
 Uses Isolation Forest / Local Outlier Factor conditioned on operating mode
 and builds context vectors: [speed, draft, RPM, wind_speed, wave_height].
+
+Note on LOF with novelty=True: sklearn warns that predict/decision_function
+must only be called on unseen data, not on the training set. If you call
+fit(data) then detect(data) with the same data, LOF results are unreliable.
+Use method="isolation_forest" (default) if you need to score training data.
 """
 
 import logging
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
@@ -30,12 +36,20 @@ class OperatingMode(str, Enum):
     AT_ANCHOR = "AT_ANCHOR"
 
 
-_MODE_RPM_RANGES: Dict[OperatingMode, Tuple[float, float]] = {
+DEFAULT_MODE_RPM_RANGES: Dict[OperatingMode, Tuple[float, float]] = {
     OperatingMode.AT_ANCHOR:    (0, 15),
     OperatingMode.MANEUVERING:  (15, 40),
     OperatingMode.SLOW_STEAM:   (40, 55),
     OperatingMode.ECO:          (55, 75),
     OperatingMode.FULL_SPEED:   (75, 130),
+}
+
+DEFAULT_MODE_SOG_RANGES: Dict[OperatingMode, Tuple[float, float]] = {
+    OperatingMode.AT_ANCHOR:    (0, 1),
+    OperatingMode.MANEUVERING:  (1, 5),
+    OperatingMode.SLOW_STEAM:   (5, 10),
+    OperatingMode.ECO:          (10, 16),
+    OperatingMode.FULL_SPEED:   (16, 100),
 }
 
 CONTEXT_FEATURES = ["nav_sog", "me_rpm", "me_draft_fore", "me_draft_aft", "wind_speed", "wave_height"]
@@ -45,16 +59,35 @@ CONTEXT_TAG_CODES = ["NAV_SOG", "ME_RPM", "ME_DRAFT_FORE", "ME_DRAFT_AFT", "WIND
 
 @dataclass
 class ContextualAnomalyPoint:
-    """Single contextual anomaly."""
+    """Single contextual anomaly.
+
+    empirical_quantile_low/high are the 5th/95th percentiles of the
+    training data for this operating mode — an empirical reference band,
+    not a statistically rigorous expected range.
+    """
     index: int
     timestamp: Optional[str]
     tag_id: str
     value: float
-    expected_range_low: float
-    expected_range_high: float
+    empirical_quantile_low: float
+    empirical_quantile_high: float
     operating_mode: str
     anomaly_score: float
     severity: str
+
+    def __getattr__(self, name: str):
+        _deprecated = {
+            "expected_range_low": "empirical_quantile_low",
+            "expected_range_high": "empirical_quantile_high",
+        }
+        if name in _deprecated:
+            warnings.warn(
+                f"{name} is deprecated, use {_deprecated[name]}",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return getattr(self, _deprecated[name])
+        raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
 
 
 @dataclass
@@ -76,24 +109,58 @@ class ContextualDetector:
     of "normal" adapts to the current asset state.
     """
 
+    VALID_MISSING_STRATEGIES = ("ffill", "median", "drop")
+
     def __init__(
         self,
         contamination: float = 0.05,
         method: str = "isolation_forest",
         min_samples_per_mode: int = 20,
+        missing_value_strategy: str = "ffill",
+        mode_rpm_ranges: Optional[Dict[OperatingMode, Tuple[float, float]]] = None,
+        mode_sog_ranges: Optional[Dict[OperatingMode, Tuple[float, float]]] = None,
     ):
+        """
+        Args:
+            contamination: Threshold parameter for anomaly detection models.
+            method: "isolation_forest" or "lof".
+            min_samples_per_mode: Minimum points per mode to train a model.
+            missing_value_strategy: How to handle NaN in sensor data.
+                "ffill" — forward fill then backward fill then zero.
+                "median" — fill with column median.
+                "drop" — drop rows with NaN.
+            mode_rpm_ranges: Custom RPM ranges for mode assignment.
+            mode_sog_ranges: Custom SOG (speed over ground) ranges for mode assignment.
+        """
         if not (0 < contamination < 0.5):
             raise ValueError(f"contamination must be in (0, 0.5), got {contamination}")
         if min_samples_per_mode < 2:
             raise ValueError(f"min_samples_per_mode must be >= 2, got {min_samples_per_mode}")
+        if missing_value_strategy not in self.VALID_MISSING_STRATEGIES:
+            raise ValueError(
+                f"missing_value_strategy must be one of {self.VALID_MISSING_STRATEGIES}, "
+                f"got '{missing_value_strategy}'"
+            )
 
         self.contamination = contamination
         self.method = method
         self.min_samples_per_mode = min_samples_per_mode
+        self.missing_value_strategy = missing_value_strategy
+        self._mode_rpm_ranges = mode_rpm_ranges or dict(DEFAULT_MODE_RPM_RANGES)
+        self._mode_sog_ranges = mode_sog_ranges or dict(DEFAULT_MODE_SOG_RANGES)
 
         self._models: Dict[str, object] = {}
         self._scalers: Dict[str, StandardScaler] = {}
         self._baselines: Dict[str, Dict[str, Tuple[float, float]]] = {}
+
+    def _handle_missing(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply configured missing value strategy."""
+        if self.missing_value_strategy == "ffill":
+            return df.ffill().bfill().fillna(0)
+        elif self.missing_value_strategy == "median":
+            return df.fillna(df.median())
+        else:
+            return df.dropna()
 
     def fit(self, data: pd.DataFrame, sensor_columns: List[str]) -> None:
         """Fit per-mode models on historical data.
@@ -115,7 +182,8 @@ class ContextualDetector:
             if not available:
                 continue
 
-            numeric = subset[available].apply(pd.to_numeric, errors="coerce").ffill().fillna(0)
+            numeric = subset[available].apply(pd.to_numeric, errors="coerce")
+            numeric = self._handle_missing(numeric)
 
             scaler = StandardScaler()
             X = scaler.fit_transform(numeric)
@@ -166,6 +234,10 @@ class ContextualDetector:
         if not available:
             return self._empty_result(asset_id, t0)
 
+        numeric_check = data[available].select_dtypes(include=[np.number])
+        if not numeric_check.empty and np.any(np.isinf(numeric_check.values)):
+            raise ValueError("Input data contains infinite values in sensor columns")
+
         mode_counts: Dict[str, int] = {}
         for m in modes:
             mode_counts[m] = mode_counts.get(m, 0) + 1
@@ -178,7 +250,8 @@ class ContextualDetector:
             if len(subset) == 0:
                 continue
 
-            numeric = subset[available].apply(pd.to_numeric, errors="coerce").fillna(0)
+            numeric = subset[available].apply(pd.to_numeric, errors="coerce")
+            numeric = self._handle_missing(numeric)
 
             if mode.value in self._models and mode.value in self._scalers:
                 scaler = self._scalers[mode.value]
@@ -225,8 +298,8 @@ class ContextualDetector:
                         timestamp=ts,
                         tag_id=col,
                         value=val,
-                        expected_range_low=bl[0],
-                        expected_range_high=bl[1],
+                        empirical_quantile_low=bl[0],
+                        empirical_quantile_high=bl[1],
                         operating_mode=mode.value,
                         anomaly_score=round(score, 4),
                         severity=severity,
@@ -281,23 +354,16 @@ class ContextualDetector:
 
         return modes
 
-    @staticmethod
-    def _rpm_to_mode(rpm: float) -> str:
-        for mode, (lo, hi) in _MODE_RPM_RANGES.items():
+    def _rpm_to_mode(self, rpm: float) -> str:
+        for mode, (lo, hi) in self._mode_rpm_ranges.items():
             if lo <= rpm < hi:
-                return mode.value
+                return mode.value if isinstance(mode, OperatingMode) else mode
         return OperatingMode.FULL_SPEED.value if rpm >= 75 else OperatingMode.AT_ANCHOR.value
 
-    @staticmethod
-    def _sog_to_mode(sog: float) -> str:
-        if sog < 1:
-            return OperatingMode.AT_ANCHOR.value
-        if sog < 5:
-            return OperatingMode.MANEUVERING.value
-        if sog < 10:
-            return OperatingMode.SLOW_STEAM.value
-        if sog < 16:
-            return OperatingMode.ECO.value
+    def _sog_to_mode(self, sog: float) -> str:
+        for mode, (lo, hi) in self._mode_sog_ranges.items():
+            if lo <= sog < hi:
+                return mode.value if isinstance(mode, OperatingMode) else mode
         return OperatingMode.FULL_SPEED.value
 
     @staticmethod

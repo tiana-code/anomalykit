@@ -1,7 +1,12 @@
 """Operational Risk Scorer.
 
-Aggregate risk score from: equipment health, weather exposure, crew fatigue,
-compliance status, route risk. Provides risk matrix visualization data and trend.
+Weighted heuristic scorecard that aggregates risk from: equipment health,
+weather exposure, crew fatigue, compliance status, route risk.
+
+This is NOT a calibrated probabilistic risk model. The output is a composite
+risk index (0-1) derived from weighted dimension scores and should not be
+interpreted as a true probability of adverse events. Provides risk matrix
+visualization data and trend.
 """
 
 import logging
@@ -80,7 +85,7 @@ class GroupRiskSummary:
     notes: str
 
 
-RISK_WEIGHTS = {
+DEFAULT_RISK_WEIGHTS = {
     "equipment_health": 0.30,
     "weather_exposure": 0.20,
     "crew_fatigue": 0.15,
@@ -118,12 +123,35 @@ LIKELIHOOD_IMPACT = [
 
 
 class OperationalRiskScorer:
-    """
-    Operational Risk Scorer.
+    """Weighted heuristic scorecard for operational risk.
 
-    Aggregates risk from five dimensions into a single 0-1 score.
-    Provides risk matrix visualization and 7-day trend.
+    Aggregates risk from five dimensions into a single 0-1 index.
+    This is a deterministic scorecard — not a calibrated probabilistic
+    model. The output should be used for ranking and alerting, not as
+    a literal probability.
     """
+
+    def __init__(
+        self,
+        weights: Optional[Dict[str, float]] = None,
+        group_trend_thresholds: Optional[Tuple[float, float]] = None,
+    ):
+        """
+        Args:
+            weights: Custom dimension weights. Keys must be from
+                {equipment_health, weather_exposure, crew_fatigue,
+                compliance_status, route_risk}. Defaults to standard weights.
+            group_trend_thresholds: (increasing_threshold, decreasing_threshold)
+                for group trend classification. Default (0.5, 0.3).
+        """
+        self.weights = dict(weights) if weights else dict(DEFAULT_RISK_WEIGHTS)
+        self._max_weight = max(self.weights.values()) if self.weights else 1.0
+        if group_trend_thresholds:
+            self._trend_increasing = group_trend_thresholds[0]
+            self._trend_decreasing = group_trend_thresholds[1]
+        else:
+            self._trend_increasing = 0.5
+            self._trend_decreasing = 0.3
 
     def score_asset(
         self,
@@ -157,7 +185,7 @@ class OperationalRiskScorer:
         comp = compliance_score
         route = route_risk_score
 
-        weather_risk = min(1.0, beaufort / 12.0)
+        weather_risk = min(1.0, (beaufort / 12.0) ** 1.5)
         equipment_risk = 1.0 - eq
         crew_risk = 1.0 - crew
         compliance_risk = 1.0 - comp
@@ -247,7 +275,12 @@ class OperationalRiskScorer:
         medium = sum(1 for v in asset_scores if v["risk_level"] == "medium")
         low = len(asset_scores) - high - medium
 
-        trend = "increasing" if avg > 0.5 else ("decreasing" if avg < 0.3 else "stable")
+        if avg > self._trend_increasing:
+            trend = "increasing"
+        elif avg < self._trend_decreasing:
+            trend = "decreasing"
+        else:
+            trend = "stable"
 
         return GroupRiskSummary(
             assessment_timestamp=datetime.now(timezone.utc).isoformat(),
@@ -270,7 +303,7 @@ class OperationalRiskScorer:
         score: float,
         description: str,
     ) -> RiskDimension:
-        weight = RISK_WEIGHTS.get(name, 0.2)
+        weight = self.weights.get(name, 0.2)
         status = (
             "critical" if score >= 0.75
             else "high" if score >= 0.50
@@ -324,11 +357,9 @@ class OperationalRiskScorer:
             ))
         return matrix
 
-    _MAX_WEIGHT = max(RISK_WEIGHTS.values())
-
     def _dimension_in_cell(self, d: RiskDimension, likelihood: str, impact: str) -> bool:
         likelihood_score = d.score
-        impact_score = d.weight / self._MAX_WEIGHT if self._MAX_WEIGHT > 0 else 0.5
+        impact_score = d.score * d.weight / self._max_weight if self._max_weight > 0 else 0.5
 
         likelihood_map = {
             "rare": (0.0, 0.15),
@@ -347,4 +378,3 @@ class OperationalRiskScorer:
         l_lo, l_hi = likelihood_map.get(likelihood, (0, 1))
         i_lo, i_hi = impact_map.get(impact, (0, 1))
         return (l_lo <= likelihood_score < l_hi) and (i_lo <= impact_score < i_hi)
-

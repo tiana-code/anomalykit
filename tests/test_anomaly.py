@@ -30,7 +30,7 @@ class TestIsolationForestDetector:
 
         assert isinstance(result, IsolationForestResult)
         assert result.anomaly_mask.shape == (210,)
-        assert result.scores.shape == (210,)
+        assert result.batch_normalized_score.shape == (210,)
         assert result.anomaly_mask.sum() > 0
 
     def test_detect_before_fit_raises(self):
@@ -42,7 +42,7 @@ class TestIsolationForestDetector:
     def test_feature_importance_returns_dict(self):
         data = pd.DataFrame(np.random.randn(100, 2), columns=["a", "b"])
         detector = IsolationForestDetector().fit(data)
-        importance = detector.get_feature_importance()
+        importance = detector.estimate_feature_sensitivity()
         assert "a" in importance
         assert "b" in importance
         assert abs(sum(importance.values()) - 1.0) < 0.01
@@ -56,6 +56,34 @@ class TestIsolationForestDetector:
         loaded = IsolationForestDetector.load(path)
         result = loaded.detect(data)
         assert result.anomaly_mask.shape == (100,)
+
+
+class TestIsolationForestDetectorExtended:
+    def test_scale_data_false(self):
+        data = pd.DataFrame(np.random.randn(100, 2), columns=["x", "y"])
+        detector = IsolationForestDetector(scale_data=False, random_state=0).fit(data)
+        result = detector.detect(data)
+        assert result.anomaly_mask.shape == (100,)
+
+    def test_score_samples_returns_raw(self):
+        data = pd.DataFrame(np.random.randn(100, 2), columns=["x", "y"])
+        detector = IsolationForestDetector(random_state=0).fit(data)
+        raw_scores = detector.score_samples(data)
+        assert raw_scores.shape == (100,)
+        assert raw_scores.dtype == np.float64
+
+    def test_deprecated_scores_field_warns(self):
+        data = pd.DataFrame(np.random.randn(100, 2), columns=["x", "y"])
+        detector = IsolationForestDetector(random_state=0).fit(data)
+        result = detector.detect(data)
+        with pytest.warns(DeprecationWarning, match="scores is deprecated"):
+            _ = result.scores
+
+    def test_deprecated_get_feature_importance_warns(self):
+        data = pd.DataFrame(np.random.randn(100, 2), columns=["x", "y"])
+        detector = IsolationForestDetector(random_state=0).fit(data)
+        with pytest.warns(DeprecationWarning, match="get_feature_importance"):
+            _ = detector.get_feature_importance()
 
 
 class TestMultiSensorPatternDetector:
@@ -164,6 +192,35 @@ class TestContextualDetector:
         assert detector._sog_to_mode(20.0) == OperatingMode.FULL_SPEED.value
 
 
+class TestContextualDetectorExtended:
+    def test_missing_value_strategy_median(self):
+        rng = np.random.RandomState(10)
+        n = 100
+        data = pd.DataFrame({
+            "speed": rng.uniform(0, 20, n),
+            "s1": rng.uniform(50, 100, n),
+        })
+        data.loc[0, "s1"] = np.nan
+        detector = ContextualDetector(contamination=0.1, missing_value_strategy="median")
+        detector.fit(data, ["s1"])
+        result = detector.detect(data, ["s1"], asset_id="test")
+        assert result.total_points == n
+
+    def test_custom_mode_ranges(self):
+        from anomalykit.anomaly.contextual_detector import OperatingMode
+        custom_sog = {
+            OperatingMode.AT_ANCHOR: (0, 2),
+            OperatingMode.MANEUVERING: (2, 8),
+            OperatingMode.SLOW_STEAM: (8, 14),
+            OperatingMode.ECO: (14, 20),
+            OperatingMode.FULL_SPEED: (20, 100),
+        }
+        detector = ContextualDetector(mode_sog_ranges=custom_sog)
+        assert detector._sog_to_mode(1.5) == OperatingMode.AT_ANCHOR.value
+        assert detector._sog_to_mode(5.0) == OperatingMode.MANEUVERING.value
+        assert detector._sog_to_mode(10.0) == OperatingMode.SLOW_STEAM.value
+
+
 class TestAdaptiveThresholdEngine:
     def test_calculate_baselines_and_violations(self):
         rng = np.random.RandomState(4)
@@ -186,7 +243,6 @@ class TestAdaptiveThresholdEngine:
         assert len(baselines_before) == 1
 
         engine.set_k_factor(5.0)
-        # Recalculate to apply new k_factor
         engine.calculate(data, ["temp"], asset_id="a1")
         baselines_after = engine.get_baselines("a1")
         assert baselines_after[0].k_factor == 5.0
@@ -210,6 +266,31 @@ class TestAdaptiveThresholdEngine:
             f"Spike points {spike_indices} should be violations but got {violation_indices}"
         )
 
+    def test_violations_sorted_by_deviation(self):
+        rng = np.random.RandomState(4)
+        values = rng.normal(100, 5, 100).tolist() + [200, 210, 220]
+        data = pd.DataFrame({"temperature": values})
+
+        engine = AdaptiveThresholdEngine(k_factor=3.0, min_history=10)
+        result = engine.calculate(data, ["temperature"], asset_id="sort-test")
+
+        sorted_violations = sorted(
+            result.violations, key=lambda v: v.deviation_mad_multiple, reverse=True
+        )
+        assert sorted_violations[0].deviation_mad_multiple >= sorted_violations[-1].deviation_mad_multiple
+
+
+class TestAdaptiveThresholdEngineExtended:
+    def test_mad_warmup_initialization(self):
+        rng = np.random.RandomState(50)
+        values = rng.normal(100, 5, 50).tolist()
+        data = pd.DataFrame({"sensor": values})
+        engine = AdaptiveThresholdEngine(k_factor=3.0, min_history=10)
+        result = engine.calculate(data, ["sensor"], asset_id="warmup-test")
+        bl = result.baselines[0]
+        assert bl.ema_abs_dev > 0
+        assert bl.ema_abs_dev != abs(values[0]) * 0.01
+
 
 class TestContextualDetectorAnomalyRate:
     def test_anomaly_rate_never_exceeds_one(self):
@@ -231,3 +312,32 @@ class TestContextualDetectorAnomalyRate:
         assert 0.0 <= result.anomaly_rate <= 1.0, (
             f"anomaly_rate={result.anomaly_rate} is out of [0, 1]"
         )
+
+
+class TestContextualAnomalyPointFields:
+    def test_empirical_quantile_fields_present(self):
+        rng = np.random.RandomState(5)
+        n = 100
+        data = pd.DataFrame({
+            "speed": rng.uniform(0, 20, n),
+            "temperature": rng.uniform(50, 100, n),
+        })
+
+        detector = ContextualDetector(contamination=0.1)
+        detector.fit(data, ["temperature"])
+        result = detector.detect(data, ["temperature"], asset_id="fields-test")
+
+        anomalous = [p for p in result.anomalies if p is not None]
+        if anomalous:
+            point = anomalous[0]
+            assert hasattr(point, "empirical_quantile_low")
+            assert hasattr(point, "empirical_quantile_high")
+
+
+class TestIsolationForestFeatureImpact:
+    def test_permutation_feature_impact_present(self):
+        data = pd.DataFrame(np.random.randn(100, 3), columns=["a", "b", "c"])
+        detector = IsolationForestDetector(random_state=0).fit(data)
+        result = detector.detect(data)
+        assert hasattr(result, "permutation_feature_impact")
+        assert result.permutation_feature_impact is not None

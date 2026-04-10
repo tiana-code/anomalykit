@@ -100,14 +100,22 @@ class TopsisRanker:
         self,
         default_weights: Optional[Dict[str, float]] = None,
         benefit_criteria: Optional[Dict[str, bool]] = None,
+        underperformer_percentile: float = 25.0,
     ):
         """
         Args:
             default_weights: Default weight per criterion (will be normalized).
             benefit_criteria: True if higher is better, False if lower is better.
+            underperformer_percentile: Percentile below which assets are
+                classified as underperformers. Default 25.0 (bottom quartile).
         """
+        if not (0 < underperformer_percentile < 100):
+            raise ValueError(
+                f"underperformer_percentile must be in (0, 100), got {underperformer_percentile}"
+            )
         self.default_weights = default_weights or {}
         self.benefit_criteria = benefit_criteria or {}
+        self.underperformer_percentile = underperformer_percentile
 
     def rank(
         self,
@@ -172,7 +180,7 @@ class TopsisRanker:
         order = np.argsort(-scores_arr)
 
         quartiles = _quartile_boundaries(scores_arr.tolist())
-        q1 = quartiles["q1"]
+        underperformer_threshold = float(np.percentile(scores_arr, self.underperformer_percentile))
 
         rankings: List[AssetRankResult] = []
         underperformers: List[str] = []
@@ -193,7 +201,7 @@ class TopsisRanker:
                 distance_to_anti_ideal=round(float(d_anti_arr[idx]), 6),
             )
             rankings.append(result)
-            if score < q1:
+            if score < underperformer_threshold:
                 underperformers.append(a.asset_id)
 
         average_score = float(np.mean(scores_arr))

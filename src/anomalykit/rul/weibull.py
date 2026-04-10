@@ -1,6 +1,7 @@
 """Weibull distribution-based RUL prediction."""
 
 import logging
+import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import pickle
@@ -15,14 +16,38 @@ from scipy.optimize import minimize
 
 @dataclass
 class WeibullResult:
-    """Result from Weibull RUL prediction."""
+    """Result from Weibull RUL prediction.
+
+    Attributes:
+        predicted_rul: Conditional mean remaining useful life.
+        conditional_quantile_interval: Interval of conditional RUL quantiles
+            under point-estimated Weibull parameters. This is NOT a confidence
+            interval on the parameters — it does not account for parameter
+            estimation uncertainty.
+        survival_probability: P(T > current_hours).
+        failure_probability: 1 - survival_probability.
+        hazard_rate: Instantaneous failure rate at current_hours.
+        shape: Weibull shape parameter (beta).
+        scale: Weibull scale parameter (eta).
+    """
     predicted_rul: float
-    confidence_interval: Tuple[float, float]
+    conditional_quantile_interval: Tuple[float, float]
     survival_probability: float
     failure_probability: float
     hazard_rate: float
     shape: float
     scale: float
+
+    def __getattr__(self, name: str):
+        _deprecated = {"confidence_interval": "conditional_quantile_interval"}
+        if name in _deprecated:
+            warnings.warn(
+                f"{name} is deprecated, use {_deprecated[name]}",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return getattr(self, _deprecated[name])
+        raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
 
 
 class WeibullRULPredictor:
@@ -86,7 +111,7 @@ class WeibullRULPredictor:
 
         Args:
             current_hours: Current operating hours
-            confidence_level: Confidence level for interval (0.5-0.99)
+            confidence_level: Level for conditional quantile interval (0.5-0.99)
 
         Returns:
             WeibullResult with RUL prediction
@@ -108,7 +133,7 @@ class WeibullRULPredictor:
 
         return WeibullResult(
             predicted_rul=max(0, predicted_rul),
-            confidence_interval=(max(0, ci_lower), max(0, ci_upper)),
+            conditional_quantile_interval=(max(0, ci_lower), max(0, ci_upper)),
             survival_probability=survival_prob,
             failure_probability=1 - survival_prob,
             hazard_rate=hazard,
@@ -168,8 +193,7 @@ class WeibullRULPredictor:
         def integrand(u):
             return self._survival_function(u) / survival_current
 
-        upper_limit = current_hours + 10 * self.scale
-        result, _ = quad(integrand, current_hours, upper_limit)
+        result, _ = quad(integrand, current_hours, np.inf, limit=100)
 
         return result
 
@@ -197,11 +221,13 @@ class WeibullRULPredictor:
         times: np.ndarray,
         censored: np.ndarray
     ) -> Tuple[float, float]:
-        """Fit Weibull with censored data using MLE."""
-        def neg_log_likelihood(params):
-            shape, scale = params
-            if shape <= 0 or scale <= 0:
-                return np.inf
+        """Fit Weibull with censored data using MLE.
+
+        Uses L-BFGS-B with log-reparameterization for numerical stability.
+        """
+        def neg_log_likelihood(log_params):
+            shape = np.exp(log_params[0])
+            scale = np.exp(log_params[1])
 
             ll = 0
             for t, c in zip(times, censored):
@@ -218,14 +244,17 @@ class WeibullRULPredictor:
         else:
             init_shape, init_scale = 2.0, np.median(times)
 
+        log_init = [np.log(init_shape), np.log(init_scale)]
+        bounds = [(np.log(0.1), np.log(10)), (np.log(1), np.log(np.max(times) * 10))]
+
         result = minimize(
             neg_log_likelihood,
-            [init_shape, init_scale],
-            method='Nelder-Mead',
-            bounds=[(0.1, 10), (1, np.max(times) * 10)]
+            log_init,
+            method='L-BFGS-B',
+            bounds=bounds,
         )
 
-        return result.x[0], result.x[1]
+        return np.exp(result.x[0]), np.exp(result.x[1])
 
     def _survival_function_params(self, t: float, shape: float, scale: float) -> float:
         """Survival function with explicit parameters."""

@@ -34,7 +34,7 @@ class TestWeibullRULPredictor:
         predictor = WeibullRULPredictor().fit(times)
         result = predictor.predict(current_hours=200, confidence_level=0.95)
 
-        ci_low, ci_high = result.confidence_interval
+        ci_low, ci_high = result.conditional_quantile_interval
         assert ci_low <= ci_high
 
     def test_survival_curve(self):
@@ -112,6 +112,13 @@ class TestWeibullRULPredictor:
         rul_at_500 = predictor.predict(current_hours=500).predicted_rul
         assert rul_at_500 > 0
         assert rul_at_500 < unconditional_mean
+
+    def test_deprecated_confidence_interval_warns(self):
+        times = np.random.RandomState(6).weibull(2, 50) * 500
+        predictor = WeibullRULPredictor().fit(times)
+        result = predictor.predict(current_hours=200)
+        with pytest.warns(DeprecationWarning, match="confidence_interval is deprecated"):
+            _ = result.confidence_interval
 
     def test_censored_mask_alignment(self):
         """C2 regression: censored array must be filtered in sync with times."""
