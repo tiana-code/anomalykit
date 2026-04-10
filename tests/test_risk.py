@@ -116,3 +116,23 @@ class TestOperationalRiskScorer:
         scorer = OperationalRiskScorer()
         with pytest.raises(TypeError):
             scorer.score_asset(asset_id="no-defaults")
+
+    def test_custom_weights(self):
+        custom_weights = {
+            "equipment_health": 0.50,
+            "weather_exposure": 0.10,
+            "crew_fatigue": 0.10,
+            "compliance_status": 0.20,
+            "route_risk": 0.10,
+        }
+        scorer = OperationalRiskScorer(weights=custom_weights)
+        result = scorer.score_asset(asset_id="cw", **EXPLICIT_ARGS)
+        eq_dim = next(d for d in result.risk_dimensions if d.dimension == "equipment_health")
+        assert eq_dim.weight == 0.50
+
+    def test_beaufort_nonlinear(self):
+        scorer = OperationalRiskScorer()
+        r6 = scorer.score_asset(asset_id="b6", equipment_health_score=1.0, weather_beaufort=6,
+                                crew_fatigue_score=1.0, compliance_score=1.0, route_risk_score=0.0)
+        weather_dim = next(d for d in r6.risk_dimensions if d.dimension == "weather_exposure")
+        assert weather_dim.score < 0.5

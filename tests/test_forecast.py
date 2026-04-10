@@ -75,3 +75,21 @@ class TestProphetForecaster:
         loaded = ProphetForecaster.load(path)
         result = loaded.predict(periods=5, freq="H")
         assert len(result.forecast) == 5
+
+    def test_model_backend_fallback(self):
+        data = self._make_data(n=30)
+        forecaster = ProphetForecaster()
+        forecaster.fit(data)
+        assert forecaster.model_backend in ("prophet", "fallback_linear")
+
+    def test_fallback_metrics_are_computed(self):
+        n = 100
+        dates = [datetime(2025, 1, 1) + timedelta(hours=i) for i in range(n)]
+        values = np.linspace(10, 50, n) + np.random.randn(n) * 0.5
+        data = pd.DataFrame({"ds": dates, "y": values})
+        forecaster = ProphetForecaster()
+        forecaster.fit(data)
+        result = forecaster.predict(periods=10, freq="H")
+        assert result.in_sample_metrics["mae"] >= 0
+        assert result.in_sample_metrics["rmse"] >= 0
+        assert result.in_sample_metrics["mae"] != result.in_sample_metrics["rmse"]

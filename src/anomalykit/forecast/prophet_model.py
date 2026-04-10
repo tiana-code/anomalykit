@@ -1,5 +1,6 @@
 """Prophet-based time series forecasting."""
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -8,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 try:
     from prophet import Prophet
@@ -34,6 +37,10 @@ class ProphetForecaster:
     - Holiday effects
     - Trend changepoints
     - Uncertainty intervals
+
+    When Prophet is not installed, falls back to a simple linear trend +
+    daily seasonality model. Check the ``model_backend`` property to see
+    which engine is active.
     """
 
     def __init__(
@@ -55,6 +62,18 @@ class ProphetForecaster:
         self._model = None
         self._is_fitted = False
         self._train_data: Optional[pd.DataFrame] = None
+
+    @property
+    def model_backend(self) -> str:
+        """Return which forecasting engine is active.
+
+        Returns:
+            "prophet" if Facebook Prophet is installed and a Prophet model
+            was fitted, or "fallback_linear" if using the simple fallback.
+        """
+        if PROPHET_AVAILABLE and self._model is not None:
+            return "prophet"
+        return "fallback_linear"
 
     def fit(self, data: pd.DataFrame) -> "ProphetForecaster":
         """
@@ -121,6 +140,10 @@ class ProphetForecaster:
                 in_sample_metrics=metrics
             )
         else:
+            logger.warning(
+                "Prophet not available; using fallback linear model. "
+                "Install prophet for full forecasting capabilities."
+            )
             return self._simple_forecast(periods, freq)
 
     def _prepare_data(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -214,7 +237,16 @@ class ProphetForecaster:
                 hour = future_dates[i].hour
                 predictions[i] += daily_pattern[hour]
 
-        std = np.std(y - (slope * x + intercept))
+        linear_fitted = slope * x + intercept
+        residuals = y - linear_fitted
+        abs_residuals = np.abs(residuals)
+
+        mae = float(np.mean(abs_residuals))
+        rmse = float(np.sqrt(np.mean(residuals ** 2)))
+        nonzero = np.abs(y) > 1e-8
+        mape = float(np.mean(abs_residuals[nonzero] / np.abs(y[nonzero])) * 100) if nonzero.any() else 0.0
+
+        std = np.std(residuals)
         lower = predictions - 1.96 * std
         upper = predictions + 1.96 * std
 
@@ -230,7 +262,11 @@ class ProphetForecaster:
             trend=self._classify_trend(slope),
             trend_slope=float(slope),
             seasonality_components=["daily"] if n >= 24 else [],
-            in_sample_metrics={"mae": std, "rmse": std, "mape": std / np.mean(y) * 100}
+            in_sample_metrics={
+                "mae": round(mae, 4),
+                "rmse": round(rmse, 4),
+                "mape": round(mape, 4),
+            },
         )
 
     def cross_validate(

@@ -118,3 +118,12 @@ class TestTopsisRanker:
         ]
         with pytest.raises(ValueError, match="same criteria"):
             ranker.rank(assets)
+
+    def test_custom_underperformer_percentile(self):
+        ranker = TopsisRanker(
+            benefit_criteria={"efficiency": True, "cost": False, "utilization": True},
+            underperformer_percentile=50.0,
+        )
+        assets = self._make_assets()
+        result = ranker.rank(assets)
+        assert len(result.underperformers) >= 1
