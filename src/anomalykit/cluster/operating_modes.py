@@ -1,18 +1,16 @@
 """Operating mode clustering with automatic mode naming."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score
+from sklearn.preprocessing import StandardScaler
 
 
 @dataclass
 class OperatingModeInfo:
-    """Information about an operating mode."""
     mode_id: int
     name: str
     size: int
@@ -21,12 +19,11 @@ class OperatingModeInfo:
     avg_load: float
     avg_fuel: float
     avg_rpm: float
-    characteristics: Dict[str, float]
+    characteristics: dict[str, float]
 
 
 @dataclass
 class ModeTransition:
-    """Transition between operating modes."""
     from_mode: str
     to_mode: str
     count: int
@@ -35,26 +32,17 @@ class ModeTransition:
 
 @dataclass
 class OperatingModeResult:
-    """Result from operating mode clustering."""
-    modes: List[OperatingModeInfo]
+    modes: list[OperatingModeInfo]
     labels: np.ndarray
-    transitions: List[ModeTransition]
-    transition_matrix: Dict[str, Dict[str, float]]
+    transitions: list[ModeTransition]
+    transition_matrix: dict[str, dict[str, float]]
     silhouette: float
     dominant_mode: str
-    time_distribution: Dict[str, float]
+    time_distribution: dict[str, float]
 
 
 class OperatingModeClusterer:
-    """Automatic clustering and naming of asset operating modes.
-
-    Identifies modes like:
-    - Idle/Anchored: Very low speed, low load
-    - Maneuvering: Low speed, variable load
-    - Slow Steaming: Moderate speed, low load
-    - Cruising: Moderate speed, moderate load
-    - Full Speed: High speed, high load
-    """
+    """Automatic clustering and naming of asset operating modes."""
 
     FEATURE_NAMES = ["speed", "rpm", "fuel_consumption", "engine_load"]
 
@@ -69,13 +57,6 @@ class OperatingModeClusterer:
     }
 
     def __init__(self, n_modes: int = 5, random_state: int = 42):
-        """
-        Initialize operating mode clusterer.
-
-        Args:
-            n_modes: Number of operating modes to identify
-            random_state: Random seed
-        """
         self.n_modes = n_modes
         self.random_state = random_state
 
@@ -86,19 +67,10 @@ class OperatingModeClusterer:
         )
         self.scaler = StandardScaler()
         self._is_fitted = False
-        self._fitted_features: List[str] = []
-        self._mode_names: Dict[int, str] = {}
+        self._fitted_features: list[str] = []
+        self._mode_names: dict[int, str] = {}
 
     def fit_predict(self, data: pd.DataFrame) -> OperatingModeResult:
-        """
-        Fit and predict operating modes.
-
-        Args:
-            data: DataFrame with speed, rpm, fuel_consumption, engine_load columns
-
-        Returns:
-            OperatingModeResult with mode assignments and analysis
-        """
         available_features = [f for f in self.FEATURE_NAMES if f in data.columns]
         if len(available_features) < 2:
             raise ValueError(f"Need at least 2 features from {self.FEATURE_NAMES}")
@@ -160,9 +132,8 @@ class OperatingModeClusterer:
         self,
         data: pd.DataFrame,
         labels: np.ndarray,
-        features: List[str]
-    ) -> Dict[int, str]:
-        """Auto-name modes based on their characteristics."""
+        features: list[str]
+    ) -> dict[int, str]:
         names = {}
 
         for i in range(self.n_modes):
@@ -171,8 +142,8 @@ class OperatingModeClusterer:
 
             avg_speed = cluster_data.get("speed", pd.Series([5])).mean()
             avg_load = cluster_data.get("engine_load", pd.Series([50])).mean()
-            avg_rpm = cluster_data.get("rpm", pd.Series([500])).mean()
-            avg_fuel = cluster_data.get("fuel_consumption", pd.Series([10])).mean()
+            _avg_rpm = cluster_data.get("rpm", pd.Series([500])).mean()
+            _avg_fuel = cluster_data.get("fuel_consumption", pd.Series([10])).mean()
 
             if avg_speed < 2:
                 if avg_load < 20:
@@ -188,7 +159,7 @@ class OperatingModeClusterer:
             else:
                 names[i] = "Cruising"
 
-        name_counts = {}
+        name_counts: dict[str, int] = {}
         for i, name in names.items():
             if name in name_counts:
                 name_counts[name] += 1
@@ -202,9 +173,8 @@ class OperatingModeClusterer:
         self,
         data: pd.DataFrame,
         labels: np.ndarray,
-        features: List[str]
-    ) -> List[OperatingModeInfo]:
-        """Create detailed mode information."""
+        features: list[str]
+    ) -> list[OperatingModeInfo]:
         modes = []
         total = len(labels)
 
@@ -240,10 +210,9 @@ class OperatingModeClusterer:
     def _calculate_transitions(
         self,
         labels: np.ndarray
-    ) -> Tuple[List[ModeTransition], Dict[str, Dict[str, float]]]:
-        """Calculate mode transitions and transition probabilities."""
-        transitions = []
-        transition_counts = {}
+    ) -> tuple[list[ModeTransition], dict[str, dict[str, float]]]:
+        transitions: list[ModeTransition] = []
+        transition_counts: dict[tuple[str, str], int] = {}
 
         for i in range(len(labels) - 1):
             from_mode = self._mode_names[labels[i]]
@@ -252,10 +221,10 @@ class OperatingModeClusterer:
             key = (from_mode, to_mode)
             transition_counts[key] = transition_counts.get(key, 0) + 1
 
-        mode_counts = {name: sum(1 for l in labels if self._mode_names[l] == name)
+        mode_counts = {name: sum(1 for lbl in labels if self._mode_names[lbl] == name)
                       for name in self._mode_names.values()}
 
-        transition_matrix = {name: {} for name in self._mode_names.values()}
+        transition_matrix: dict[str, dict[str, float]] = {name: {} for name in self._mode_names.values()}
 
         for (from_mode, to_mode), count in transition_counts.items():
             prob = count / mode_counts[from_mode] if mode_counts[from_mode] > 0 else 0
@@ -270,7 +239,7 @@ class OperatingModeClusterer:
 
         return transitions, transition_matrix
 
-    def get_feature_importance(self) -> Dict[str, float]:
+    def get_feature_importance(self) -> dict[str, float]:
         """Get feature importance based on cluster center variance."""
         if not self._is_fitted:
             return {}

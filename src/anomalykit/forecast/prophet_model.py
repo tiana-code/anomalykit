@@ -1,11 +1,11 @@
 """Prophet-based time series forecasting."""
 
 import logging
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
 import pickle
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -21,26 +21,19 @@ except ImportError:
 
 @dataclass
 class ProphetResult:
-    """Result from Prophet forecast."""
     forecast: pd.DataFrame
     trend: str
     trend_slope: float
-    seasonality_components: List[str]
-    in_sample_metrics: Dict[str, float]
+    seasonality_components: list[str]
+    in_sample_metrics: dict[str, float]
 
 
 class ProphetForecaster:
     """Prophet-based time series forecasting.
 
-    Uses Facebook Prophet for forecasting with:
-    - Automatic seasonality detection
-    - Holiday effects
-    - Trend changepoints
-    - Uncertainty intervals
-
-    When Prophet is not installed, falls back to a simple linear trend +
-    daily seasonality model. Check the ``model_backend`` property to see
-    which engine is active.
+    Falls back to a simple linear trend + daily seasonality model when
+    Prophet is not installed. Check ``model_backend`` to see which engine
+    is active.
     """
 
     def __init__(
@@ -59,29 +52,19 @@ class ProphetForecaster:
         self.seasonality_prior_scale = seasonality_prior_scale
         self.interval_width = interval_width
 
-        self._model = None
+        self._model: Any = None
         self._is_fitted = False
-        self._train_data: Optional[pd.DataFrame] = None
+        self._train_data: pd.DataFrame | None = None
 
     @property
     def model_backend(self) -> str:
-        """Return which forecasting engine is active.
-
-        Returns:
-            "prophet" if Facebook Prophet is installed and a Prophet model
-            was fitted, or "fallback_linear" if using the simple fallback.
-        """
+        """Returns "prophet" or "fallback_linear"."""
         if PROPHET_AVAILABLE and self._model is not None:
             return "prophet"
         return "fallback_linear"
 
     def fit(self, data: pd.DataFrame) -> "ProphetForecaster":
-        """
-        Fit Prophet model to historical data.
-
-        Args:
-            data: DataFrame with 'ds' (datetime) and 'y' (value) columns
-        """
+        """Accepts 'ds'/'y' columns or 'timestamp'/'value' (auto-renamed)."""
         df = self._prepare_data(data)
 
         if len(df) < 10:
@@ -108,16 +91,6 @@ class ProphetForecaster:
         periods: int,
         freq: str = "H"
     ) -> ProphetResult:
-        """
-        Generate forecast.
-
-        Args:
-            periods: Number of periods to forecast
-            freq: Frequency ('H' for hourly, 'D' for daily)
-
-        Returns:
-            ProphetResult with forecast
-        """
         if not self._is_fitted:
             raise ValueError("Model not fitted. Call fit() first.")
 
@@ -147,7 +120,6 @@ class ProphetForecaster:
             return self._simple_forecast(periods, freq)
 
     def _prepare_data(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Prepare data for Prophet (needs 'ds' and 'y' columns)."""
         df = data.copy()
 
         if "timestamp" in df.columns:
@@ -163,7 +135,6 @@ class ProphetForecaster:
         return df[["ds", "y"]]
 
     def _calculate_trend_slope(self, forecast: pd.DataFrame) -> float:
-        """Calculate trend slope from forecast."""
         if "trend" in forecast.columns and len(forecast) > 1:
             trend = forecast["trend"].values
             times = np.arange(len(trend))
@@ -172,13 +143,11 @@ class ProphetForecaster:
         return 0.0
 
     def _classify_trend(self, slope: float) -> str:
-        """Classify trend direction."""
         if abs(slope) < 0.01:
             return "flat"
         return "increasing" if slope > 0 else "decreasing"
 
-    def _get_enabled_seasonalities(self) -> List[str]:
-        """Return seasonality components enabled in config."""
+    def _get_enabled_seasonalities(self) -> list[str]:
         components = []
         if self.yearly_seasonality:
             components.append("yearly")
@@ -188,8 +157,7 @@ class ProphetForecaster:
             components.append("daily")
         return components
 
-    def _calculate_metrics(self) -> Dict[str, float]:
-        """Calculate in-sample accuracy metrics."""
+    def _calculate_metrics(self) -> dict[str, float]:
         if PROPHET_AVAILABLE and self._model is not None and self._train_data is not None:
             in_sample = self._model.predict(self._train_data)
             actual = self._train_data["y"].values
@@ -207,7 +175,6 @@ class ProphetForecaster:
         return {"mae": 0.0, "rmse": 0.0, "mape": 0.0}
 
     def _simple_forecast(self, periods: int, freq: str) -> ProphetResult:
-        """Simple fallback forecasting when Prophet is not available."""
         if self._train_data is None:
             raise ValueError("No training data available")
 
@@ -220,10 +187,7 @@ class ProphetForecaster:
         slope, intercept = np.polyfit(x, y, 1)
 
         last_date = df["ds"].max()
-        if freq == "H":
-            delta = timedelta(hours=1)
-        else:
-            delta = timedelta(days=1)
+        delta = timedelta(hours=1) if freq == "H" else timedelta(days=1)
 
         future_dates = [last_date + delta * (i + 1) for i in range(periods)]
 
@@ -274,12 +238,8 @@ class ProphetForecaster:
         initial: str = "365 days",
         period: str = "30 days",
         horizon: str = "30 days"
-    ) -> Optional[Dict[str, float]]:
-        """Perform cross-validation. Requires Prophet.
-
-        Returns:
-            Cross-validation metrics, or None if Prophet is unavailable.
-        """
+    ) -> dict[str, float] | None:
+        """Perform cross-validation. Returns None if Prophet is unavailable."""
         if not PROPHET_AVAILABLE or self._model is None:
             return None
 
@@ -299,7 +259,7 @@ class ProphetForecaster:
             "mape": float(metrics["mape"].mean()) if "mape" in metrics else 0.0
         }
 
-    def get_components(self) -> Optional[pd.DataFrame]:
+    def get_components(self) -> pd.DataFrame | None:
         """Get forecast components (trend, seasonality)."""
         if PROPHET_AVAILABLE and self._model is not None:
             future = self._model.make_future_dataframe(periods=0)

@@ -2,7 +2,6 @@
 
 import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 import numpy as np
@@ -13,22 +12,17 @@ from sklearn.preprocessing import StandardScaler
 
 @dataclass
 class IsolationForestResult:
-    """Result from Isolation Forest detection.
-
+    """
     Attributes:
-        anomaly_mask: Boolean array where True indicates anomaly.
-        batch_normalized_score: Anomaly scores normalized per-batch via z-score
-            and clipped to [-1, 1]. These scores are NOT comparable across
-            different datasets or runs.
-        decision_scores: Raw decision_function output from sklearn.
-        permutation_feature_impact: Per-feature permutation impact on
-            decision_function. This is NOT Shapley attribution or tree-path
-            decomposition — it measures permutation sensitivity.
+        batch_normalized_score: Z-score normalized, clipped to [-1, 1].
+            NOT comparable across different datasets or runs.
+        permutation_feature_impact: NOT Shapley attribution — measures
+            permutation sensitivity on decision_function.
     """
     anomaly_mask: np.ndarray
     batch_normalized_score: np.ndarray
     decision_scores: np.ndarray
-    permutation_feature_impact: Optional[Dict[str, np.ndarray]] = None
+    permutation_feature_impact: dict[str, np.ndarray] | None = None
 
     def __getattr__(self, name: str):
         _deprecated = {
@@ -61,18 +55,10 @@ class IsolationForestDetector:
         scale_data: bool = True,
     ):
         """
-        Args:
-            n_estimators: Number of trees in the forest.
-            contamination: Proportion used to set the decision threshold.
-                This is a threshold parameter for the decision function,
-                not a ground-truth anomaly rate. In production the actual
-                anomaly rate may differ significantly.
-            max_samples: Number of samples to draw for each tree.
-            random_state: Random seed for reproducibility.
-            scale_data: Whether to apply StandardScaler before fitting.
-                Isolation Forest does not require scaling (it uses random
-                splits on feature ranges), but scaling can help when
-                features have very different magnitudes.
+        contamination: Sets the decision threshold, not a ground-truth rate.
+            Actual anomaly rate in production may differ significantly.
+        scale_data: IF doesn't require scaling, but helps when features have
+            very different magnitudes.
         """
         if not (0 < contamination < 0.5):
             raise ValueError(f"contamination must be in (0, 0.5), got {contamination}")
@@ -91,15 +77,10 @@ class IsolationForestDetector:
             n_jobs=-1
         )
         self.scaler = StandardScaler()
-        self._feature_names: List[str] = []
+        self._feature_names: list[str] = []
         self._is_fitted = False
 
     def fit(self, data: pd.DataFrame) -> "IsolationForestDetector":
-        """Train Isolation Forest on data.
-
-        Args:
-            data: Training DataFrame with numeric columns.
-        """
         numeric_data = data.select_dtypes(include=[np.number])
         if numeric_data.empty:
             raise ValueError("No numeric columns found in input data")
@@ -109,10 +90,7 @@ class IsolationForestDetector:
 
         self._feature_names = list(numeric_data.columns)
 
-        if self.scale_data:
-            X = self.scaler.fit_transform(numeric_data)
-        else:
-            X = numeric_data.values
+        X = self.scaler.fit_transform(numeric_data) if self.scale_data else numeric_data.values
 
         self.model.fit(X)
         self._is_fitted = True
@@ -120,14 +98,6 @@ class IsolationForestDetector:
         return self
 
     def detect(self, data: pd.DataFrame) -> IsolationForestResult:
-        """Detect anomalies using trained Isolation Forest.
-
-        Args:
-            data: DataFrame with numeric columns to analyze.
-
-        Returns:
-            IsolationForestResult with predictions and scores.
-        """
         if not self._is_fitted:
             raise ValueError("Model not fitted. Call fit() first.")
 
@@ -156,11 +126,10 @@ class IsolationForestDetector:
         )
 
     def score_samples(self, data: pd.DataFrame) -> np.ndarray:
-        """Return raw sklearn anomaly scores (score_samples passthrough).
+        """Raw sklearn score_samples passthrough.
 
-        Lower scores indicate more anomalous points. Unlike
-        batch_normalized_score, these are the unmodified sklearn scores
-        and can be compared across calls on data from the same distribution.
+        Lower = more anomalous. Unlike batch_normalized_score, these are
+        comparable across calls on data from the same distribution.
         """
         if not self._is_fitted:
             raise ValueError("Model not fitted. Call fit() first.")
@@ -177,8 +146,7 @@ class IsolationForestDetector:
         self,
         X: np.ndarray,
         scores: np.ndarray
-    ) -> Dict[str, np.ndarray]:
-        """Estimate per-feature permutation impact on decision_function."""
+    ) -> dict[str, np.ndarray]:
         if len(self._feature_names) == 0:
             return {}
 
@@ -195,7 +163,7 @@ class IsolationForestDetector:
 
         return impacts
 
-    def estimate_feature_sensitivity(self) -> Dict[str, float]:
+    def estimate_feature_sensitivity(self) -> dict[str, float]:
         """Estimate overall feature sensitivity via permutation on synthetic data.
 
         Generates standard-normal reference data and measures how much
@@ -227,7 +195,7 @@ class IsolationForestDetector:
 
         return importances
 
-    def get_feature_importance(self) -> Dict[str, float]:
+    def get_feature_importance(self) -> dict[str, float]:
         """Deprecated: use estimate_feature_sensitivity()."""
         warnings.warn(
             "get_feature_importance() is deprecated, use estimate_feature_sensitivity()",
@@ -237,7 +205,6 @@ class IsolationForestDetector:
         return self.estimate_feature_sensitivity()
 
     def save(self, path: Path) -> None:
-        """Save model to disk using joblib."""
         import joblib
         model_data = {
             "model": self.model,

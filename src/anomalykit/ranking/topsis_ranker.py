@@ -1,41 +1,32 @@
-"""TOPSIS-based multi-criteria ranking.
+"""TOPSIS-based multi-criteria ranking."""
 
-Multi-criteria TOPSIS ranking (Technique for Order of Preference by
-Similarity to Ideal Solution) across configurable KPIs.
-"""
-
-import math
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass
 
 import numpy as np
 
 
 @dataclass
 class AssetCriteriaInput:
-    """Input criteria for a single asset."""
     asset_id: str
-    criteria: Dict[str, float]
+    criteria: dict[str, float]
 
 
 @dataclass
 class AssetRankResult:
-    """Ranking result for a single asset."""
     asset_id: str
     rank: int
     overall_score: float
-    criteria_values: Dict[str, float]
+    criteria_values: dict[str, float]
     distance_to_ideal: float
     distance_to_anti_ideal: float
 
 
 @dataclass
 class RankingResult:
-    """Full group ranking result."""
-    rankings: List[AssetRankResult]
+    rankings: list[AssetRankResult]
     average_score: float
-    quartile_boundaries: Dict[str, float]
-    underperformers: List[str]
+    quartile_boundaries: dict[str, float]
+    underperformers: list[str]
 
 
 def _normalize_matrix(matrix: np.ndarray) -> np.ndarray:
@@ -44,14 +35,14 @@ def _normalize_matrix(matrix: np.ndarray) -> np.ndarray:
     return matrix / col_norms
 
 
-def _apply_weights(normalized: np.ndarray, weights: List[float]) -> np.ndarray:
+def _apply_weights(normalized: np.ndarray, weights: list[float]) -> np.ndarray:
     return normalized * np.array(weights)
 
 
 def _ideal_solutions(
     weighted: np.ndarray,
-    criteria_names: List[str],
-    benefit_criteria: Dict[str, bool],
+    criteria_names: list[str],
+    benefit_criteria: dict[str, bool],
 ) -> tuple:
     ideal = np.zeros(weighted.shape[1])
     anti_ideal = np.zeros(weighted.shape[1])
@@ -78,7 +69,7 @@ def _relative_closeness(d_ideal: np.ndarray, d_anti: np.ndarray) -> np.ndarray:
     return d_anti / denominator
 
 
-def _quartile_boundaries(scores: List[float]) -> Dict[str, float]:
+def _quartile_boundaries(scores: list[float]) -> dict[str, float]:
     if not scores:
         return {"q1": 0.0, "q2": 0.0, "q3": 0.0}
     arr = np.array(scores)
@@ -90,25 +81,14 @@ def _quartile_boundaries(scores: List[float]) -> Dict[str, float]:
 
 
 class TopsisRanker:
-    """TOPSIS-based multi-criteria ranker.
-
-    Generic ranker that can be configured with any set of criteria,
-    weights, and benefit/cost classification.
-    """
+    """TOPSIS-based multi-criteria ranker."""
 
     def __init__(
         self,
-        default_weights: Optional[Dict[str, float]] = None,
-        benefit_criteria: Optional[Dict[str, bool]] = None,
+        default_weights: dict[str, float] | None = None,
+        benefit_criteria: dict[str, bool] | None = None,
         underperformer_percentile: float = 25.0,
     ):
-        """
-        Args:
-            default_weights: Default weight per criterion (will be normalized).
-            benefit_criteria: True if higher is better, False if lower is better.
-            underperformer_percentile: Percentile below which assets are
-                classified as underperformers. Default 25.0 (bottom quartile).
-        """
         if not (0 < underperformer_percentile < 100):
             raise ValueError(
                 f"underperformer_percentile must be in (0, 100), got {underperformer_percentile}"
@@ -119,18 +99,9 @@ class TopsisRanker:
 
     def rank(
         self,
-        assets: List[AssetCriteriaInput],
-        weights: Optional[Dict[str, float]] = None,
+        assets: list[AssetCriteriaInput],
+        weights: dict[str, float] | None = None,
     ) -> RankingResult:
-        """Rank assets using TOPSIS.
-
-        Args:
-            assets: List of asset criteria inputs.
-            weights: Optional weight overrides per criterion.
-
-        Returns:
-            RankingResult with rankings, scores, quartiles.
-        """
         if not assets:
             return RankingResult(
                 rankings=[],
@@ -182,8 +153,8 @@ class TopsisRanker:
         quartiles = _quartile_boundaries(scores_arr.tolist())
         underperformer_threshold = float(np.percentile(scores_arr, self.underperformer_percentile))
 
-        rankings: List[AssetRankResult] = []
-        underperformers: List[str] = []
+        rankings: list[AssetRankResult] = []
+        underperformers: list[str] = []
 
         for rank_pos, idx in enumerate(order):
             a = assets[idx]
@@ -216,9 +187,9 @@ class TopsisRanker:
     def rank_single(
         self,
         target_asset_id: str,
-        assets: List[AssetCriteriaInput],
-        weights: Optional[Dict[str, float]] = None,
-    ) -> Optional[AssetRankResult]:
+        assets: list[AssetCriteriaInput],
+        weights: dict[str, float] | None = None,
+    ) -> AssetRankResult | None:
         """Rank all assets and return result for a specific one."""
         result = self.rank(assets, weights)
         for r in result.rankings:

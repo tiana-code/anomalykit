@@ -1,23 +1,15 @@
-"""Context-Aware Anomaly Detector.
+"""Context-aware anomaly detection conditioned on operating mode.
 
-Detects anomalies that account for asset load, speed, and environmental context.
-Normal operating ranges shift depending on the operating mode, so a reading
-that is anomalous in ECO mode may be perfectly normal at FULL_SPEED.
-
-Uses Isolation Forest / Local Outlier Factor conditioned on operating mode
-and builds context vectors: [speed, draft, RPM, wind_speed, wave_height].
-
-Note on LOF with novelty=True: sklearn warns that predict/decision_function
-must only be called on unseen data, not on the training set. If you call
-fit(data) then detect(data) with the same data, LOF results are unreliable.
-Use method="isolation_forest" (default) if you need to score training data.
+Note on LOF with novelty=True: predict/decision_function must only be called on
+unseen data. If you call fit(data) then detect(data) on the same data, LOF results
+are unreliable. Use method="isolation_forest" (default) if you need to score training data.
 """
 
 import logging
 import warnings
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -36,7 +28,7 @@ class OperatingMode(str, Enum):
     AT_ANCHOR = "AT_ANCHOR"
 
 
-DEFAULT_MODE_RPM_RANGES: Dict[OperatingMode, Tuple[float, float]] = {
+DEFAULT_MODE_RPM_RANGES: dict[OperatingMode, tuple[float, float]] = {
     OperatingMode.AT_ANCHOR:    (0, 15),
     OperatingMode.MANEUVERING:  (15, 40),
     OperatingMode.SLOW_STEAM:   (40, 55),
@@ -44,7 +36,7 @@ DEFAULT_MODE_RPM_RANGES: Dict[OperatingMode, Tuple[float, float]] = {
     OperatingMode.FULL_SPEED:   (75, 130),
 }
 
-DEFAULT_MODE_SOG_RANGES: Dict[OperatingMode, Tuple[float, float]] = {
+DEFAULT_MODE_SOG_RANGES: dict[OperatingMode, tuple[float, float]] = {
     OperatingMode.AT_ANCHOR:    (0, 1),
     OperatingMode.MANEUVERING:  (1, 5),
     OperatingMode.SLOW_STEAM:   (5, 10),
@@ -66,7 +58,7 @@ class ContextualAnomalyPoint:
     not a statistically rigorous expected range.
     """
     index: int
-    timestamp: Optional[str]
+    timestamp: str | None
     tag_id: str
     value: float
     empirical_quantile_low: float
@@ -92,13 +84,12 @@ class ContextualAnomalyPoint:
 
 @dataclass
 class ContextualDetectionResult:
-    """Full contextual detection result."""
     asset_id: str
-    operating_mode_distribution: Dict[str, int]
+    operating_mode_distribution: dict[str, int]
     total_points: int
     anomaly_count: int
     anomaly_rate: float
-    anomalies: List[ContextualAnomalyPoint]
+    anomalies: list[ContextualAnomalyPoint]
     processing_time_ms: float
 
 
@@ -117,20 +108,12 @@ class ContextualDetector:
         method: str = "isolation_forest",
         min_samples_per_mode: int = 20,
         missing_value_strategy: str = "ffill",
-        mode_rpm_ranges: Optional[Dict[OperatingMode, Tuple[float, float]]] = None,
-        mode_sog_ranges: Optional[Dict[OperatingMode, Tuple[float, float]]] = None,
+        mode_rpm_ranges: dict[OperatingMode, tuple[float, float]] | None = None,
+        mode_sog_ranges: dict[OperatingMode, tuple[float, float]] | None = None,
     ):
         """
-        Args:
-            contamination: Threshold parameter for anomaly detection models.
-            method: "isolation_forest" or "lof".
-            min_samples_per_mode: Minimum points per mode to train a model.
-            missing_value_strategy: How to handle NaN in sensor data.
-                "ffill" — forward fill then backward fill then zero.
-                "median" — fill with column median.
-                "drop" — drop rows with NaN.
-            mode_rpm_ranges: Custom RPM ranges for mode assignment.
-            mode_sog_ranges: Custom SOG (speed over ground) ranges for mode assignment.
+        missing_value_strategy: "ffill" — forward fill then bfill then zero;
+        "median" — fill with column median; "drop" — drop rows with NaN.
         """
         if not (0 < contamination < 0.5):
             raise ValueError(f"contamination must be in (0, 0.5), got {contamination}")
@@ -149,12 +132,11 @@ class ContextualDetector:
         self._mode_rpm_ranges = mode_rpm_ranges or dict(DEFAULT_MODE_RPM_RANGES)
         self._mode_sog_ranges = mode_sog_ranges or dict(DEFAULT_MODE_SOG_RANGES)
 
-        self._models: Dict[str, object] = {}
-        self._scalers: Dict[str, StandardScaler] = {}
-        self._baselines: Dict[str, Dict[str, Tuple[float, float]]] = {}
+        self._models: dict[str, Any] = {}
+        self._scalers: dict[str, StandardScaler] = {}
+        self._baselines: dict[str, dict[str, tuple[float, float]]] = {}
 
     def _handle_missing(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply configured missing value strategy."""
         if self.missing_value_strategy == "ffill":
             return df.ffill().bfill().fillna(0)
         elif self.missing_value_strategy == "median":
@@ -162,13 +144,7 @@ class ContextualDetector:
         else:
             return df.dropna()
 
-    def fit(self, data: pd.DataFrame, sensor_columns: List[str]) -> None:
-        """Fit per-mode models on historical data.
-
-        Args:
-            data: DataFrame with sensor columns + optional context columns.
-            sensor_columns: Columns to treat as sensor readings.
-        """
+    def fit(self, data: pd.DataFrame, sensor_columns: list[str]) -> None:
         modes = self._assign_modes(data)
         data = data.copy()
         data["_mode"] = modes
@@ -191,14 +167,16 @@ class ContextualDetector:
 
             if self.method == "lof":
                 n_neighbors = min(20, len(X) - 1)
-                model = LocalOutlierFactor(n_neighbors=max(2, n_neighbors), contamination=self.contamination, novelty=True)
+                model = LocalOutlierFactor(
+                    n_neighbors=max(2, n_neighbors), contamination=self.contamination, novelty=True,
+                )
             else:
                 model = IsolationForest(contamination=self.contamination, random_state=42, n_estimators=100)
 
             model.fit(X)
             self._models[mode.value] = model
 
-            baselines: Dict[str, Tuple[float, float]] = {}
+            baselines: dict[str, tuple[float, float]] = {}
             for col in available:
                 vals = pd.to_numeric(subset[col], errors="coerce").dropna()
                 if len(vals) > 2:
@@ -210,19 +188,9 @@ class ContextualDetector:
     def detect(
         self,
         data: pd.DataFrame,
-        sensor_columns: List[str],
+        sensor_columns: list[str],
         asset_id: str = "",
     ) -> ContextualDetectionResult:
-        """Detect contextual anomalies in current data.
-
-        Args:
-            data: Current sensor DataFrame.
-            sensor_columns: Sensor columns to analyze.
-            asset_id: Asset identifier.
-
-        Returns:
-            ContextualDetectionResult with anomalies.
-        """
         import time
         t0 = time.time()
 
@@ -238,11 +206,11 @@ class ContextualDetector:
         if not numeric_check.empty and np.any(np.isinf(numeric_check.values)):
             raise ValueError("Input data contains infinite values in sensor columns")
 
-        mode_counts: Dict[str, int] = {}
+        mode_counts: dict[str, int] = {}
         for m in modes:
             mode_counts[m] = mode_counts.get(m, 0) + 1
 
-        anomalies: List[ContextualAnomalyPoint] = []
+        anomalies: list[ContextualAnomalyPoint] = []
 
         for mode in OperatingMode:
             mask = data["_mode"] == mode.value
@@ -259,10 +227,10 @@ class ContextualDetector:
                 X = scaler.transform(numeric)
 
                 predictions = model.predict(X)
-                if hasattr(model, "decision_function"):
-                    scores_raw = model.decision_function(X)
-                else:
-                    scores_raw = np.zeros(len(X))
+                scores_raw = (
+                    model.decision_function(X) if hasattr(model, "decision_function")
+                    else np.zeros(len(X))
+                )
 
                 if scores_raw.max() != scores_raw.min():
                     scores = 1.0 - (scores_raw - scores_raw.min()) / (scores_raw.max() - scores_raw.min())
@@ -323,9 +291,8 @@ class ContextualDetector:
             processing_time_ms=elapsed,
         )
 
-    def _assign_modes(self, data: pd.DataFrame) -> List[str]:
-        """Assign operating mode to each row based on RPM or speed heuristic."""
-        modes: List[str] = []
+    def _assign_modes(self, data: pd.DataFrame) -> list[str]:
+        modes: list[str] = []
         rpm_col = None
         for candidate in ("me_rpm", "ME_RPM", "rpm"):
             if candidate in data.columns:
@@ -367,8 +334,7 @@ class ContextualDetector:
         return OperatingMode.FULL_SPEED.value
 
     @staticmethod
-    def _fallback_zscore(numeric: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-        """Simple Z-score fallback when no trained model is available."""
+    def _fallback_zscore(numeric: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         means = numeric.mean()
         stds = numeric.std().replace(0, 1)
         z = ((numeric - means) / stds).abs()

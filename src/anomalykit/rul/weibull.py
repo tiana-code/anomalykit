@@ -1,37 +1,29 @@
 """Weibull distribution-based RUL prediction."""
 
 import logging
+import pickle
 import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
-import pickle
 from pathlib import Path
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
 from scipy import stats
 from scipy.optimize import minimize
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class WeibullResult:
-    """Result from Weibull RUL prediction.
-
+    """
     Attributes:
-        predicted_rul: Conditional mean remaining useful life.
-        conditional_quantile_interval: Interval of conditional RUL quantiles
-            under point-estimated Weibull parameters. This is NOT a confidence
-            interval on the parameters — it does not account for parameter
-            estimation uncertainty.
+        conditional_quantile_interval: Conditional RUL quantiles under
+            point-estimated Weibull parameters. NOT a confidence interval —
+            does not account for parameter estimation uncertainty.
         survival_probability: P(T > current_hours).
-        failure_probability: 1 - survival_probability.
-        hazard_rate: Instantaneous failure rate at current_hours.
-        shape: Weibull shape parameter (beta).
-        scale: Weibull scale parameter (eta).
     """
     predicted_rul: float
-    conditional_quantile_interval: Tuple[float, float]
+    conditional_quantile_interval: tuple[float, float]
     survival_probability: float
     failure_probability: float
     hazard_rate: float
@@ -51,29 +43,41 @@ class WeibullResult:
 
 
 class WeibullRULPredictor:
-    """Weibull distribution-based Remaining Useful Life prediction.
+    """Weibull-based RUL prediction.
 
-    The Weibull distribution is commonly used for reliability analysis
-    because it can model various failure patterns:
+    Failure pattern interpretation by shape (beta):
     - beta < 1: decreasing failure rate (infant mortality)
     - beta = 1: constant failure rate (exponential)
     - beta > 1: increasing failure rate (wear-out)
     """
 
     def __init__(self):
-        self.shape: Optional[float] = None
-        self.scale: Optional[float] = None
+        self._shape: float | None = None
+        self._scale: float | None = None
         self._is_fitted = False
         self._n_samples = 0
 
-    def fit(self, times_to_failure: np.ndarray, censored: Optional[np.ndarray] = None) -> "WeibullRULPredictor":
-        """
-        Fit Weibull distribution to failure data.
+    @property
+    def shape(self) -> float:
+        if self._shape is None:
+            raise ValueError("Model not fitted. Call fit() first.")
+        return self._shape
 
-        Args:
-            times_to_failure: Array of times to failure
-            censored: Boolean array indicating censored observations (optional)
-        """
+    @shape.setter
+    def shape(self, value: float) -> None:
+        self._shape = value
+
+    @property
+    def scale(self) -> float:
+        if self._scale is None:
+            raise ValueError("Model not fitted. Call fit() first.")
+        return self._scale
+
+    @scale.setter
+    def scale(self, value: float) -> None:
+        self._scale = value
+
+    def fit(self, times_to_failure: np.ndarray, censored: np.ndarray | None = None) -> "WeibullRULPredictor":
         times = np.array(times_to_failure)
         mask = times > 0
         n_dropped = int((~mask).sum())
@@ -92,9 +96,9 @@ class WeibullRULPredictor:
             raise ValueError("Need at least 3 failure times for fitting")
 
         if censored is not None:
-            self.shape, self.scale = self._fit_mle_censored(times, censored)
+            self._shape, self._scale = self._fit_mle_censored(times, censored)
         else:
-            self.shape, _, self.scale = stats.weibull_min.fit(times, floc=0)
+            self._shape, _, self._scale = stats.weibull_min.fit(times, floc=0)
 
         self._is_fitted = True
         self._n_samples = len(times)
@@ -106,16 +110,6 @@ class WeibullRULPredictor:
         current_hours: float,
         confidence_level: float = 0.95
     ) -> WeibullResult:
-        """
-        Predict RUL given current operating hours.
-
-        Args:
-            current_hours: Current operating hours
-            confidence_level: Level for conditional quantile interval (0.5-0.99)
-
-        Returns:
-            WeibullResult with RUL prediction
-        """
         if not self._is_fitted:
             raise ValueError("Model not fitted. Call fit() first.")
 
@@ -144,7 +138,7 @@ class WeibullRULPredictor:
     def get_survival_curve(
         self,
         times: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Get survival curve S(t) for given times."""
         if not self._is_fitted:
             raise ValueError("Model not fitted.")
@@ -155,7 +149,7 @@ class WeibullRULPredictor:
     def get_hazard_curve(
         self,
         times: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Get hazard curve h(t) for given times."""
         if not self._is_fitted:
             raise ValueError("Model not fitted.")
@@ -164,26 +158,22 @@ class WeibullRULPredictor:
         return times, hazard
 
     def _survival_function(self, t: float) -> float:
-        """Weibull survival function S(t) = exp(-(t/eta)^beta)."""
         if t <= 0:
             return 1.0
         return np.exp(-((t / self.scale) ** self.shape))
 
     def _hazard_function(self, t: float) -> float:
-        """Weibull hazard function h(t) = (beta/eta) * (t/eta)^(beta-1)."""
         if t <= 0:
             return 0.0
         return (self.shape / self.scale) * ((t / self.scale) ** (self.shape - 1))
 
     def _pdf(self, t: float) -> float:
-        """Weibull probability density function."""
         if t <= 0:
             return 0.0
         return (self.shape / self.scale) * ((t / self.scale) ** (self.shape - 1)) * \
                np.exp(-((t / self.scale) ** self.shape))
 
     def _conditional_mean_rul(self, current_hours: float) -> float:
-        """Calculate conditional mean RUL: E[T - t | T > t]."""
         from scipy.integrate import quad
 
         survival_current = self._survival_function(current_hours)
@@ -202,7 +192,6 @@ class WeibullRULPredictor:
         current_hours: float,
         p: float
     ) -> float:
-        """Calculate conditional percentile of RUL."""
         survival_current = self._survival_function(current_hours)
         if survival_current < 1e-10:
             return 0.0
@@ -220,17 +209,14 @@ class WeibullRULPredictor:
         self,
         times: np.ndarray,
         censored: np.ndarray
-    ) -> Tuple[float, float]:
-        """Fit Weibull with censored data using MLE.
-
-        Uses L-BFGS-B with log-reparameterization for numerical stability.
-        """
+    ) -> tuple[float, float]:
+        """L-BFGS-B with log-reparameterization for numerical stability."""
         def neg_log_likelihood(log_params):
             shape = np.exp(log_params[0])
             scale = np.exp(log_params[1])
 
             ll = 0
-            for t, c in zip(times, censored):
+            for t, c in zip(times, censored, strict=True):
                 if c:
                     ll += np.log(self._survival_function_params(t, shape, scale))
                 else:
@@ -257,13 +243,11 @@ class WeibullRULPredictor:
         return np.exp(result.x[0]), np.exp(result.x[1])
 
     def _survival_function_params(self, t: float, shape: float, scale: float) -> float:
-        """Survival function with explicit parameters."""
         if t <= 0:
             return 1.0
         return np.exp(-((t / scale) ** shape))
 
     def _pdf_params(self, t: float, shape: float, scale: float) -> float:
-        """PDF with explicit parameters."""
         if t <= 0:
             return 0.0
         return (shape / scale) * ((t / scale) ** (shape - 1)) * \
@@ -284,7 +268,7 @@ class WeibullRULPredictor:
         from scipy.special import gamma
         return self.scale * gamma(1 + 1 / self.shape)
 
-    def get_parameters(self) -> Dict[str, float]:
+    def get_parameters(self) -> dict[str, float]:
         """Get model parameters."""
         if not self._is_fitted:
             return {}
@@ -312,8 +296,8 @@ class WeibullRULPredictor:
             model_data = pickle.load(f)
 
         predictor = cls()
-        predictor.shape = model_data["shape"]
-        predictor.scale = model_data["scale"]
+        predictor._shape = model_data["shape"]
+        predictor._scale = model_data["scale"]
         predictor._n_samples = model_data["n_samples"]
         predictor._is_fitted = True
 

@@ -1,25 +1,18 @@
-"""Operational Risk Scorer.
+"""Weighted heuristic risk scorecard (equipment, weather, crew, compliance, route).
 
-Weighted heuristic scorecard that aggregates risk from: equipment health,
-weather exposure, crew fatigue, compliance status, route risk.
-
-This is NOT a calibrated probabilistic risk model. The output is a composite
-risk index (0-1) derived from weighted dimension scores and should not be
-interpreted as a true probability of adverse events. Provides risk matrix
-visualization data and trend.
+NOT a calibrated probabilistic model — output is a composite index (0-1) for
+ranking and alerting only, not a literal probability of adverse events.
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class RiskDimension:
-    """A single risk dimension score."""
     dimension: str
     score: float
     weight: float
@@ -32,17 +25,15 @@ class RiskDimension:
 
 @dataclass
 class RiskMatrixCell:
-    """A cell in the risk matrix (likelihood x impact)."""
     likelihood: str
     impact: str
     risk_category: str
     color: str
-    applicable_dimensions: List[str]
+    applicable_dimensions: list[str]
 
 
 @dataclass
 class RiskTrendPoint:
-    """Historical risk score trend point."""
     date: str
     total_risk_score: float
     equipment_score: float
@@ -54,23 +45,21 @@ class RiskTrendPoint:
 
 @dataclass
 class OperationalRiskResult:
-    """Operational risk assessment result for an asset."""
     asset_id: str
     asset_name: str
     assessment_timestamp: str
     overall_risk_score: float
     risk_level: str
-    risk_dimensions: List[RiskDimension]
-    risk_matrix: List[RiskMatrixCell]
-    trend_7d: Optional[List[RiskTrendPoint]]
-    top_risk_factors: List[str]
-    recommended_actions: List[str]
+    risk_dimensions: list[RiskDimension]
+    risk_matrix: list[RiskMatrixCell]
+    trend_7d: list[RiskTrendPoint] | None
+    top_risk_factors: list[str]
+    recommended_actions: list[str]
     notes: str
 
 
 @dataclass
 class GroupRiskSummary:
-    """Group-level risk summary."""
     assessment_timestamp: str
     group_average_risk: float
     highest_risk_asset_id: str
@@ -80,7 +69,7 @@ class GroupRiskSummary:
     assets_at_medium_risk: int
     assets_at_low_risk: int
     total_assets: int
-    asset_risk_scores: List[Dict]
+    asset_risk_scores: list[dict]
     group_trend: str
     notes: str
 
@@ -123,27 +112,13 @@ LIKELIHOOD_IMPACT = [
 
 
 class OperationalRiskScorer:
-    """Weighted heuristic scorecard for operational risk.
-
-    Aggregates risk from five dimensions into a single 0-1 index.
-    This is a deterministic scorecard — not a calibrated probabilistic
-    model. The output should be used for ranking and alerting, not as
-    a literal probability.
-    """
+    """Weighted heuristic scorecard for operational risk."""
 
     def __init__(
         self,
-        weights: Optional[Dict[str, float]] = None,
-        group_trend_thresholds: Optional[Tuple[float, float]] = None,
+        weights: dict[str, float] | None = None,
+        group_trend_thresholds: tuple[float, float] | None = None,
     ):
-        """
-        Args:
-            weights: Custom dimension weights. Keys must be from
-                {equipment_health, weather_exposure, crew_fatigue,
-                compliance_status, route_risk}. Defaults to standard weights.
-            group_trend_thresholds: (increasing_threshold, decreasing_threshold)
-                for group trend classification. Default (0.5, 0.3).
-        """
         self.weights = dict(weights) if weights else dict(DEFAULT_RISK_WEIGHTS)
         self._max_weight = max(self.weights.values()) if self.weights else 1.0
         if group_trend_thresholds:
@@ -163,20 +138,6 @@ class OperationalRiskScorer:
         route_risk_score: float,
         asset_name: str = "",
     ) -> OperationalRiskResult:
-        """Compute overall operational risk for an asset.
-
-        Args:
-            asset_id: Asset identifier.
-            equipment_health_score: 0-1 (1=perfect health).
-            weather_beaufort: Beaufort scale 0-12.
-            crew_fatigue_score: 0-1 (1=fully rested).
-            compliance_score: 0-1 (1=fully compliant).
-            route_risk_score: 0-1 (1=maximum risk).
-            asset_name: Human-readable asset name.
-
-        Returns:
-            OperationalRiskResult with multi-dimensional risk assessment.
-        """
         display_name = asset_name or asset_id[:16]
 
         eq = equipment_health_score
@@ -237,13 +198,8 @@ class OperationalRiskScorer:
 
     def score_group(
         self,
-        results: List[OperationalRiskResult],
+        results: list[OperationalRiskResult],
     ) -> GroupRiskSummary:
-        """Compute group-level risk summary from pre-scored assets.
-
-        Args:
-            results: List of OperationalRiskResult from score_asset() calls.
-        """
         asset_scores = []
         for result in results:
             asset_scores.append({
@@ -269,8 +225,8 @@ class OperationalRiskScorer:
                 notes="No assets to assess.",
             )
 
-        asset_scores.sort(key=lambda v: v["risk_score"], reverse=True)
-        avg = sum(v["risk_score"] for v in asset_scores) / len(asset_scores)
+        asset_scores.sort(key=lambda v: float(v["risk_score"]), reverse=True)
+        avg = sum(float(v["risk_score"]) for v in asset_scores) / len(asset_scores)
         high = sum(1 for v in asset_scores if v["risk_level"] in ("critical", "high"))
         medium = sum(1 for v in asset_scores if v["risk_level"] == "medium")
         low = len(asset_scores) - high - medium
@@ -285,9 +241,9 @@ class OperationalRiskScorer:
         return GroupRiskSummary(
             assessment_timestamp=datetime.now(timezone.utc).isoformat(),
             group_average_risk=round(avg, 4),
-            highest_risk_asset_id=asset_scores[0]["asset_id"],
-            highest_risk_asset_name=asset_scores[0]["asset_name"],
-            highest_risk_score=asset_scores[0]["risk_score"],
+            highest_risk_asset_id=str(asset_scores[0]["asset_id"]),
+            highest_risk_asset_name=str(asset_scores[0]["asset_name"]),
+            highest_risk_score=float(asset_scores[0]["risk_score"]),
             assets_at_high_risk=high,
             assets_at_medium_risk=medium,
             assets_at_low_risk=low,
@@ -330,7 +286,7 @@ class OperationalRiskScorer:
             return "medium"
         return "low"
 
-    def _recommend_actions(self, dimensions: List[RiskDimension], overall: float) -> List[str]:
+    def _recommend_actions(self, dimensions: list[RiskDimension], overall: float) -> list[str]:
         actions = []
         for d in sorted(dimensions, key=lambda x: x.score, reverse=True):
             if d.score >= 0.70:
@@ -341,7 +297,7 @@ class OperationalRiskScorer:
             actions.append("All dimensions within acceptable range; maintain routine monitoring")
         return actions[:5]
 
-    def _build_risk_matrix(self, dimensions: List[RiskDimension]) -> List[RiskMatrixCell]:
+    def _build_risk_matrix(self, dimensions: list[RiskDimension]) -> list[RiskMatrixCell]:
         matrix = []
         for likelihood, impact, category, color in LIKELIHOOD_IMPACT:
             applicable = [
