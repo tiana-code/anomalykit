@@ -1,20 +1,10 @@
-"""Asset Behavior Classifier.
-
-Loads pre-trained KMeans centroids from a joblib bundle and classifies
-assets into behavioral clusters (liner, tramp, fishing, anchored, etc.)
-based on their operational features.
-
-When no trained centroids file is available, the classifier uses a rule-based
-fallback that assigns clusters based on speed, course variability, gap length,
-and port time ratio thresholds. Fallback results have cluster_id=-1 and
-cluster_affinity=0.5.
-"""
+"""KMeans-based asset behavior classifier. Fallback: cluster_id=-1, affinity=0.5."""
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 
@@ -31,7 +21,7 @@ FEATURE_NAMES = [
     "port_time_ratio",
 ]
 
-_DEFAULT_CLUSTERS: Dict[str, str] = {
+_DEFAULT_CLUSTERS: dict[str, str] = {
     "liner": "High-speed assets on regular routes with low speed and course variability.",
     "tramp": "Medium-speed assets with high course variability - irregular routes.",
     "fishing": "Low average speed with high speed and course variability.",
@@ -47,7 +37,6 @@ _DEFAULT_CLUSTERS: Dict[str, str] = {
 
 @dataclass
 class BehaviorClassification:
-    """Result of classifying a single asset."""
     cluster_id: int
     cluster_label: str
     cluster_affinity: float
@@ -56,21 +45,18 @@ class BehaviorClassification:
 
 
 class AssetBehaviorClassifier:
-    """Classifies assets into behavioral clusters using pre-trained centroids."""
-
-    def __init__(self, model_path: Optional[str] = None):
+    def __init__(self, model_path: str | None = None):
         self._model_path = model_path or os.getenv(MODEL_PATH_ENV, DEFAULT_MODEL_PATH)
         self._scaler = None
         self._model = None
-        self._cluster_labels: Dict[int, str] = {}
-        self._cluster_descriptions: Dict[int, str] = {}
-        self._feature_names: List[str] = FEATURE_NAMES
-        self._centroids_original: Optional[np.ndarray] = None
+        self._cluster_labels: dict[int, str] = {}
+        self._cluster_descriptions: dict[int, str] = {}
+        self._feature_names: list[str] = FEATURE_NAMES
+        self._centroids_original: np.ndarray | None = None
         self._loaded = False
         self._load_model()
 
     def _load_model(self):
-        """Attempt to load the pre-trained model bundle."""
         path = Path(self._model_path)
         if not path.exists():
             logger.warning("Behavior model not found at %s - classifier will use defaults", path)
@@ -99,16 +85,7 @@ class AssetBehaviorClassifier:
     def is_loaded(self) -> bool:
         return self._loaded
 
-    def classify(self, asset_features: Dict[str, float]) -> BehaviorClassification:
-        """Classify a single asset based on its features.
-
-        Args:
-            asset_features: dict with keys matching feature_names
-                (avg_speed, speed_std, cog_std, avg_gap_hours, port_time_ratio)
-
-        Returns:
-            BehaviorClassification with cluster assignment and confidence.
-        """
+    def classify(self, asset_features: dict[str, float]) -> BehaviorClassification:
         if not self._loaded:
             return self._fallback_classify(asset_features)
 
@@ -116,6 +93,7 @@ class AssetBehaviorClassifier:
             [asset_features.get(f, 0.0) for f in self._feature_names]
         ).reshape(1, -1)
 
+        assert self._scaler is not None and self._model is not None
         scaled = self._scaler.transform(feature_vector)
         cluster_id = int(self._model.predict(scaled)[0])
 
@@ -142,23 +120,12 @@ class AssetBehaviorClassifier:
         )
 
     def classify_batch(
-        self, assets: List[Dict[str, Any]]
-    ) -> List[BehaviorClassification]:
-        """Classify multiple assets.
-
-        Args:
-            assets: list of dicts, each with feature values.
-
-        Returns:
-            List of BehaviorClassification in same order.
-        """
+        self, assets: list[dict[str, Any]]
+    ) -> list[BehaviorClassification]:
         return [self.classify(a) for a in assets]
 
-    def get_cluster_descriptions(self) -> Dict[str, Dict[str, Any]]:
-        """Return human-readable descriptions for each cluster.
-
-        Returns dict keyed by cluster_label with description and centroid values.
-        """
+    def get_cluster_descriptions(self) -> dict[str, dict[str, Any]]:
+        """Returns dict keyed by cluster_label with description and centroid feature values."""
         if not self._loaded:
             return {
                 label: {"description": desc, "centroid": {}}
@@ -171,7 +138,7 @@ class AssetBehaviorClassifier:
             if self._centroids_original is not None and cid < len(self._centroids_original):
                 centroid = {
                     fname: round(float(val), 4)
-                    for fname, val in zip(self._feature_names, self._centroids_original[cid])
+                    for fname, val in zip(self._feature_names, self._centroids_original[cid], strict=False)
                 }
             result[label] = {
                 "cluster_id": cid,
@@ -180,11 +147,7 @@ class AssetBehaviorClassifier:
             }
         return result
 
-    def _fallback_classify(self, features: Dict[str, float]) -> BehaviorClassification:
-        """Rule-based fallback when no trained centroids file is available.
-
-        Returns cluster_id=-1 with confidence=0.5 to distinguish from ML predictions.
-        """
+    def _fallback_classify(self, features: dict[str, float]) -> BehaviorClassification:
         avg_speed = features.get("avg_speed", 0.0)
         speed_std = features.get("speed_std", 0.0)
         cog_std = features.get("cog_std", 0.0)
@@ -220,7 +183,7 @@ class AssetBehaviorClassifier:
             cluster_description=desc,
         )
 
-    def get_historical_baseline(self, asset_type: str) -> Dict[str, float]:
+    def get_historical_baseline(self, asset_type: str) -> dict[str, float]:
         """Return historical baseline averages for an asset type.
 
         Uses centroids that most closely match the asset type's expected behavior.
@@ -248,20 +211,30 @@ class AssetBehaviorClassifier:
                 if label == target_label and cid < len(self._centroids_original):
                     return {
                         fname: round(float(val), 4)
-                        for fname, val in zip(self._feature_names, self._centroids_original[cid])
+                        for fname, val in zip(self._feature_names, self._centroids_original[cid], strict=False)
                     }
 
         _type_defaults = {
-            "TANKER":     {"avg_speed": 11.0, "speed_std": 2.5, "cog_std": 15.0, "avg_gap_hours": 0.5, "port_time_ratio": 0.25},
-            "CONTAINER":  {"avg_speed": 16.0, "speed_std": 2.0, "cog_std": 10.0, "avg_gap_hours": 0.3, "port_time_ratio": 0.15},
-            "CARGO":      {"avg_speed": 11.0, "speed_std": 3.0, "cog_std": 20.0, "avg_gap_hours": 0.5, "port_time_ratio": 0.30},
-            "BULK":       {"avg_speed": 10.5, "speed_std": 2.0, "cog_std": 12.0, "avg_gap_hours": 0.4, "port_time_ratio": 0.35},
-            "FISHING":    {"avg_speed": 4.0,  "speed_std": 3.5, "cog_std": 45.0, "avg_gap_hours": 1.0, "port_time_ratio": 0.20},
-            "PASSENGER":  {"avg_speed": 18.0, "speed_std": 3.0, "cog_std": 12.0, "avg_gap_hours": 0.2, "port_time_ratio": 0.20},
-            "TUG":        {"avg_speed": 5.0,  "speed_std": 3.0, "cog_std": 50.0, "avg_gap_hours": 0.3, "port_time_ratio": 0.60},
-            "HSC":        {"avg_speed": 25.0, "speed_std": 5.0, "cog_std": 15.0, "avg_gap_hours": 0.2, "port_time_ratio": 0.15},
-            "SAILING":    {"avg_speed": 6.0,  "speed_std": 3.0, "cog_std": 35.0, "avg_gap_hours": 1.5, "port_time_ratio": 0.30},
-            "LNG_CARRIER":{"avg_speed": 15.0, "speed_std": 1.5, "cog_std": 8.0,  "avg_gap_hours": 0.3, "port_time_ratio": 0.20},
+            "TANKER":      {"avg_speed": 11.0, "speed_std": 2.5, "cog_std": 15.0,
+                            "avg_gap_hours": 0.5, "port_time_ratio": 0.25},
+            "CONTAINER":   {"avg_speed": 16.0, "speed_std": 2.0, "cog_std": 10.0,
+                            "avg_gap_hours": 0.3, "port_time_ratio": 0.15},
+            "CARGO":       {"avg_speed": 11.0, "speed_std": 3.0, "cog_std": 20.0,
+                            "avg_gap_hours": 0.5, "port_time_ratio": 0.30},
+            "BULK":        {"avg_speed": 10.5, "speed_std": 2.0, "cog_std": 12.0,
+                            "avg_gap_hours": 0.4, "port_time_ratio": 0.35},
+            "FISHING":     {"avg_speed": 4.0,  "speed_std": 3.5, "cog_std": 45.0,
+                            "avg_gap_hours": 1.0, "port_time_ratio": 0.20},
+            "PASSENGER":   {"avg_speed": 18.0, "speed_std": 3.0, "cog_std": 12.0,
+                            "avg_gap_hours": 0.2, "port_time_ratio": 0.20},
+            "TUG":         {"avg_speed": 5.0,  "speed_std": 3.0, "cog_std": 50.0,
+                            "avg_gap_hours": 0.3, "port_time_ratio": 0.60},
+            "HSC":         {"avg_speed": 25.0, "speed_std": 5.0, "cog_std": 15.0,
+                            "avg_gap_hours": 0.2, "port_time_ratio": 0.15},
+            "SAILING":     {"avg_speed": 6.0,  "speed_std": 3.0, "cog_std": 35.0,
+                            "avg_gap_hours": 1.5, "port_time_ratio": 0.30},
+            "LNG_CARRIER": {"avg_speed": 15.0, "speed_std": 1.5, "cog_std": 8.0,
+                            "avg_gap_hours": 0.3, "port_time_ratio": 0.20},
         }
         return _type_defaults.get(asset_type.upper(), {
             "avg_speed": 10.0, "speed_std": 3.0, "cog_std": 20.0,

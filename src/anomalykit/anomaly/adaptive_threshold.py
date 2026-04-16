@@ -1,17 +1,13 @@
-"""Adaptive Threshold Engine.
+"""Adaptive Threshold Engine — EMA-based per-asset baselines.
 
-Per-asset baselines that evolve over time using Exponential Moving Average (EMA).
-Threshold = baseline +/- k * adaptive absolute deviation (k configurable, default 3).
-
-Baselines are recalculated periodically and can be persisted to DB or Redis.
+Threshold = EMA mean +/- k * EMA absolute deviation.
 """
 
 import logging
 import time
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -21,11 +17,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TagBaseline:
-    """Baseline statistics for a single tag on a single asset.
+    """ema_abs_dev is mean absolute deviation, not std. Thresholds = mean +/- k * ema_abs_dev."""
 
-    ema_abs_dev is an exponentially weighted mean absolute deviation,
-    not a standard deviation. Thresholds are mean +/- k * ema_abs_dev.
-    """
     tag_code: str
     asset_id: str
     ema_mean: float
@@ -50,13 +43,10 @@ class TagBaseline:
 
 @dataclass
 class ThresholdViolation:
-    """A point where a value exceeds adaptive thresholds.
+    """deviation_mad_multiple = MAD units from EMA mean (NOT sigma/z-score)."""
 
-    deviation_mad_multiple is the number of mean-absolute-deviation units
-    the value deviates from the EMA mean. This is NOT a sigma/z-score.
-    """
     index: int
-    timestamp: Optional[str]
+    timestamp: str | None
     tag_code: str
     value: float
     threshold_low: float
@@ -78,22 +68,15 @@ class ThresholdViolation:
 
 @dataclass
 class AdaptiveThresholdResult:
-    """Result from adaptive threshold calculation."""
     asset_id: str
-    baselines: List[TagBaseline]
-    violations: List[ThresholdViolation]
+    baselines: list[TagBaseline]
+    violations: list[ThresholdViolation]
     total_points: int
     violation_count: int
     processing_time_ms: float
 
 
 class AdaptiveThresholdEngine:
-    """Per-asset, per-tag adaptive thresholds using EMA.
-
-    The engine maintains an exponential moving average (EMA) of mean and
-    absolute deviation for each tag.  New data shifts the baseline smoothly,
-    while sudden deviations trigger violations.
-    """
 
     def __init__(
         self,
@@ -101,13 +84,6 @@ class AdaptiveThresholdEngine:
         ema_alpha: float = 0.1,
         min_history: int = 24,
     ):
-        """
-        Args:
-            k_factor: Number of adaptive absolute deviations for threshold.
-            ema_alpha: Smoothing factor for EMA (0 < alpha <= 1).
-                       Lower = slower adaptation.
-            min_history: Minimum data points before adaptive thresholds activate.
-        """
         if not (0 < ema_alpha <= 1):
             raise ValueError(f"ema_alpha must be in (0, 1], got {ema_alpha}")
         if k_factor <= 0:
@@ -118,30 +94,19 @@ class AdaptiveThresholdEngine:
         self.k_factor = k_factor
         self.ema_alpha = ema_alpha
         self.min_history = min_history
-
-        self._baselines: Dict[Tuple[str, str], TagBaseline] = {}
+        self._baselines: dict[tuple[str, str], TagBaseline] = {}
 
     def calculate(
         self,
         data: pd.DataFrame,
-        tag_columns: List[str],
+        tag_columns: list[str],
         asset_id: str,
     ) -> AdaptiveThresholdResult:
-        """Calculate adaptive thresholds and detect violations.
-
-        Args:
-            data: Timeseries DataFrame sorted by time.
-            tag_columns: Column names to analyze.
-            asset_id: Asset identifier.
-
-        Returns:
-            AdaptiveThresholdResult with baselines and violations.
-        """
         t0 = time.time()
 
         available = [c for c in tag_columns if c in data.columns]
-        baselines: List[TagBaseline] = []
-        violations: List[ThresholdViolation] = []
+        baselines: list[TagBaseline] = []
+        violations: list[ThresholdViolation] = []
 
         for tag in available:
             series = pd.to_numeric(data[tag], errors="coerce").dropna()
@@ -164,17 +129,15 @@ class AdaptiveThresholdEngine:
             processing_time_ms=(time.time() - t0) * 1000,
         )
 
-    def get_baselines(self, asset_id: str) -> List[TagBaseline]:
-        """Return all stored baselines for an asset."""
+    def get_baselines(self, asset_id: str) -> list[TagBaseline]:
         return [
             bl for (vid, _), bl in self._baselines.items()
             if vid == asset_id
         ]
 
     def set_k_factor(self, k: float) -> None:
-        """Update k-factor and recalculate all thresholds."""
         self.k_factor = k
-        for key, bl in self._baselines.items():
+        for _key, bl in self._baselines.items():
             bl.k_factor = k
             bl.threshold_low = bl.ema_mean - k * bl.ema_abs_dev
             bl.threshold_high = bl.ema_mean + k * bl.ema_abs_dev
@@ -185,12 +148,7 @@ class AdaptiveThresholdEngine:
         asset_id: str,
         tag_code: str,
         series: pd.Series,
-    ) -> Tuple[TagBaseline, List[ThresholdViolation]]:
-        """Process points sequentially: check violation first, then update baseline.
-
-        This avoids look-ahead bias by never using future data to set the
-        threshold that a current point is checked against.
-        """
+    ) -> tuple[TagBaseline, list[ThresholdViolation]]:
         key = (asset_id, tag_code)
         values = series.values.astype(float)
 
@@ -220,43 +178,46 @@ class AdaptiveThresholdEngine:
             self._baselines[key] = bl
 
         bl = self._baselines[key]
-        violations: List[ThresholdViolation] = []
+        violations: list[ThresholdViolation] = []
 
         for idx in series.index:
             val = float(series[idx])
 
-            if bl.sample_count >= self.min_history:
-                if val < bl.threshold_low or val > bl.threshold_high:
-                    dev_multiple = (val - bl.ema_mean) / bl.ema_abs_dev if bl.ema_abs_dev > 0 else 0
-                    severity = self._deviation_to_severity(abs(dev_multiple))
+            if bl.sample_count >= self.min_history and (
+                val < bl.threshold_low or val > bl.threshold_high
+            ):
+                dev_multiple = (
+                    (val - bl.ema_mean) / bl.ema_abs_dev if bl.ema_abs_dev > 0 else 0
+                )
+                severity = self._deviation_to_severity(abs(dev_multiple))
 
-                    ts = None
-                    if idx in data.index:
-                        row = data.loc[idx]
-                        for ts_col in ("timestamp", "bucket"):
-                            if ts_col in data.columns:
-                                ts_val = row.get(ts_col)
-                                if ts_val is not None:
-                                    ts = str(ts_val)
-                                    break
+                ts = None
+                if idx in data.index:
+                    row = data.loc[idx]
+                    for ts_col in ("timestamp", "bucket"):
+                        if ts_col in data.columns:
+                            ts_val = row.get(ts_col)
+                            if ts_val is not None:
+                                ts = str(ts_val)
+                                break
 
-                    positional_idx = series.index.get_loc(idx)
-                    if isinstance(positional_idx, slice):
-                        positional_idx = positional_idx.start or 0
+                positional_idx = series.index.get_loc(idx)
+                if isinstance(positional_idx, slice):
+                    positional_idx = positional_idx.start or 0
 
-                    violations.append(ThresholdViolation(
-                        index=int(positional_idx),
-                        timestamp=ts,
-                        tag_code=tag_code,
-                        value=val,
-                        threshold_low=bl.threshold_low,
-                        threshold_high=bl.threshold_high,
-                        deviation_mad_multiple=round(dev_multiple, 3),
-                        severity=severity,
-                    ))
+                violations.append(ThresholdViolation(
+                    index=int(positional_idx),
+                    timestamp=ts,
+                    tag_code=tag_code,
+                    value=val,
+                    threshold_low=bl.threshold_low,
+                    threshold_high=bl.threshold_high,
+                    deviation_mad_multiple=round(dev_multiple, 3),
+                    severity=severity,
+                ))
 
-            bl.ema_mean = self.ema_alpha * val + (1 - self.ema_alpha) * bl.ema_mean
             deviation = abs(val - bl.ema_mean)
+            bl.ema_mean = self.ema_alpha * val + (1 - self.ema_alpha) * bl.ema_mean
             bl.ema_abs_dev = self.ema_alpha * deviation + (1 - self.ema_alpha) * bl.ema_abs_dev
             bl.ema_abs_dev = max(bl.ema_abs_dev, 1e-6)
             bl.threshold_low = bl.ema_mean - self.k_factor * bl.ema_abs_dev

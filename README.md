@@ -21,53 +21,6 @@ A domain-agnostic Python library for multivariate anomaly detection, remaining u
 | **ranking** | `TopsisRanker` | Multi-criteria TOPSIS ranking with configurable weights and benefit/cost criteria |
 | **risk** | `OperationalRiskScorer` | Multi-dimensional risk aggregation (equipment, weather, crew, compliance, route) with risk matrix |
 
-## Architecture
-
-```mermaid
-graph TD
-    subgraph anomalykit
-        subgraph Anomaly Detection
-            IF[IsolationForestDetector]
-            MS[MultiSensorPatternDetector]
-            SF[SensorFusionDetector]
-            CC[CrossCorrelationAnalyzer]
-            CD[ContextualDetector]
-            AT[AdaptiveThresholdEngine]
-        end
-
-        subgraph Predictive
-            WB[WeibullRULPredictor]
-            PF[ProphetForecaster]
-        end
-
-        subgraph Clustering
-            BC[AssetBehaviorClassifier]
-            OM[OperatingModeClusterer]
-        end
-
-        subgraph Scoring
-            TR[TopsisRanker]
-            RS[OperationalRiskScorer]
-        end
-    end
-
-    DATA[Sensor/Telemetry Data] --> IF
-    DATA --> MS
-    DATA --> SF
-    DATA --> CC
-    DATA --> CD
-    DATA --> AT
-
-    HIST[Historical Failure Data] --> WB
-    TS[Time Series Data] --> PF
-
-    FEAT[Asset Feature Vectors] --> BC
-    OPS[Operational Parameters] --> OM
-
-    KPI[KPI Metrics] --> TR
-    RISK_IN[Risk Dimensions] --> RS
-```
-
 ## Tech Stack
 
 - **Python** >= 3.10

@@ -1,18 +1,10 @@
-"""Multi-Sensor Analytics Models.
-
-Includes:
-- Multi-sensor pattern detection
-- Sensor fusion via PCA
-- Cross-sensor correlation analysis
-"""
+"""Multi-sensor pattern detection, PCA fusion, and cross-correlation analysis."""
 
 import logging
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 from scipy.signal import correlate
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -22,43 +14,35 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PatternDetectionResult:
-    """Result from multi-sensor pattern detection."""
-    patterns: List[Dict]
+    patterns: list[dict]
     anomaly_mask: np.ndarray
     scores: np.ndarray
     pattern_count: int
-    correlation_matrix: Optional[np.ndarray] = None
+    correlation_matrix: np.ndarray | None = None
 
 
 @dataclass
 class SensorFusionResult:
-    """Result from sensor fusion."""
     principal_component: np.ndarray
     anomaly_mask: np.ndarray
     scores: np.ndarray
-    component_weights: Dict[str, float]
+    component_weights: dict[str, float]
     reconstruction_error: np.ndarray
     explained_variance: float
 
 
 @dataclass
 class CrossCorrelationResult:
-    """Result from cross-correlation analysis."""
     correlation_matrix: np.ndarray
     lag_matrix: np.ndarray
     anomaly_mask: np.ndarray
     scores: np.ndarray
-    broken_correlations: List[Dict]
-    correlation_changes: List[Dict]
+    broken_correlations: list[dict]
+    correlation_changes: list[dict]
 
 
 class MultiSensorPatternDetector:
-    """
-    Multi-sensor pattern detection.
-
-    Detects anomalous patterns across multiple correlated sensors
-    using correlation analysis and subsequence matching.
-    """
+    """Detects anomalous patterns across correlated sensors using correlation analysis and subsequence matching."""
 
     def __init__(
         self,
@@ -69,12 +53,11 @@ class MultiSensorPatternDetector:
         self.correlation_threshold = correlation_threshold
         self.pattern_window = pattern_window
         self.anomaly_threshold = anomaly_threshold
-        self._baseline_patterns: List[np.ndarray] = []
-        self._baseline_correlations: Optional[np.ndarray] = None
+        self._baseline_patterns: list[np.ndarray] = []
+        self._baseline_correlations: np.ndarray | None = None
         self._scaler = StandardScaler()
 
-    def fit(self, data: pd.DataFrame, sensor_columns: List[str]) -> None:
-        """Fit on historical baseline data."""
+    def fit(self, data: pd.DataFrame, sensor_columns: list[str]) -> None:
         if len(data) < self.pattern_window * 2:
             raise ValueError(
                 f"Insufficient data for pattern detection: {len(data)} rows, "
@@ -100,9 +83,8 @@ class MultiSensorPatternDetector:
     def detect(
         self,
         data: pd.DataFrame,
-        sensor_columns: List[str]
+        sensor_columns: list[str]
     ) -> PatternDetectionResult:
-        """Detect anomalous patterns in sensor data."""
         sensor_data = data[sensor_columns].values
 
         if len(sensor_data) < self.pattern_window:
@@ -169,28 +151,22 @@ class MultiSensorPatternDetector:
 
 
 class SensorFusionDetector:
-    """
-    Sensor fusion for anomaly detection.
-
-    Uses PCA-based fusion to combine multiple sensors into
-    a unified representation and detect deviations.
-    """
+    """PCA-based sensor fusion that detects anomalies via reconstruction error."""
 
     def __init__(
         self,
-        n_components: Optional[int] = None,
+        n_components: int | None = None,
         variance_threshold: float = 0.95,
         reconstruction_threshold: float = 3.0
     ):
         self.n_components = n_components
         self.variance_threshold = variance_threshold
         self.reconstruction_threshold = reconstruction_threshold
-        self._pca: Optional[PCA] = None
+        self._pca: PCA | None = None
         self._scaler = StandardScaler()
-        self._baseline_reconstruction_error: Optional[float] = None
+        self._baseline_reconstruction_error: float | None = None
 
-    def fit(self, data: pd.DataFrame, sensor_columns: List[str]) -> None:
-        """Fit PCA model on baseline data."""
+    def fit(self, data: pd.DataFrame, sensor_columns: list[str]) -> None:
         sensor_data = data[sensor_columns].values
         if not np.all(np.isfinite(sensor_data)):
             raise ValueError("Input data contains NaN or infinite values")
@@ -202,9 +178,9 @@ class SensorFusionDetector:
             temp_pca.fit(normalized)
             cumsum = np.cumsum(temp_pca.explained_variance_ratio_)
             n_components = np.argmax(cumsum >= self.variance_threshold) + 1
-            n_components = max(1, min(n_components, len(sensor_columns) - 1))
+            n_components = int(max(1, min(n_components, len(sensor_columns) - 1)))
         else:
-            n_components = min(self.n_components, len(sensor_columns) - 1)
+            n_components = int(min(self.n_components, len(sensor_columns) - 1))
 
         self._pca = PCA(n_components=n_components)
         transformed = self._pca.fit_transform(normalized)
@@ -217,9 +193,8 @@ class SensorFusionDetector:
     def fuse(
         self,
         data: pd.DataFrame,
-        sensor_columns: List[str]
+        sensor_columns: list[str]
     ) -> SensorFusionResult:
-        """Fuse sensors and detect anomalies."""
         sensor_data = data[sensor_columns].values
 
         if self._pca is None:
@@ -261,14 +236,7 @@ class SensorFusionDetector:
 
 
 class CrossCorrelationAnalyzer:
-    """
-    Cross-sensor correlation analysis.
-
-    Analyzes correlations between sensors to detect:
-    - Broken correlations (sensors that should be correlated but aren't)
-    - Lagged correlations
-    - Correlation changes over time
-    """
+    """Detects broken correlations, lagged correlations, and correlation shifts between sensors."""
 
     def __init__(
         self,
@@ -279,12 +247,11 @@ class CrossCorrelationAnalyzer:
         self.max_lag = max_lag
         self.correlation_change_threshold = correlation_change_threshold
         self.min_correlation = min_correlation
-        self._baseline_correlations: Optional[np.ndarray] = None
-        self._baseline_lags: Optional[np.ndarray] = None
-        self._sensor_pairs: List[Tuple[str, str]] = []
+        self._baseline_correlations: np.ndarray | None = None
+        self._baseline_lags: np.ndarray | None = None
+        self._sensor_pairs: list[tuple[str, str]] = []
 
-    def fit(self, data: pd.DataFrame, sensor_columns: List[str]) -> None:
-        """Calculate baseline correlations."""
+    def fit(self, data: pd.DataFrame, sensor_columns: list[str]) -> None:
         sensor_data = data[sensor_columns].values
         n_sensors = len(sensor_columns)
 
@@ -311,9 +278,8 @@ class CrossCorrelationAnalyzer:
     def analyze(
         self,
         data: pd.DataFrame,
-        sensor_columns: List[str]
+        sensor_columns: list[str]
     ) -> CrossCorrelationResult:
-        """Analyze cross-correlations and detect anomalies."""
         sensor_data = data[sensor_columns].values
         n_sensors = len(sensor_columns)
         n_samples = len(data)
@@ -367,7 +333,7 @@ class CrossCorrelationAnalyzer:
         scores = np.zeros(n_samples)
 
         if broken_correlations:
-            total_change = sum(bc["change"] for bc in broken_correlations)
+            total_change = sum(float(bc["change"]) for bc in broken_correlations)
             normalized_score = min(1.0, total_change / (len(broken_correlations) * self.correlation_change_threshold))
             scores[:] = normalized_score
 
@@ -387,8 +353,7 @@ class CrossCorrelationAnalyzer:
         self,
         x: np.ndarray,
         y: np.ndarray
-    ) -> Tuple[float, int]:
-        """Calculate cross-correlation and optimal lag."""
+    ) -> tuple[float, int]:
         x_norm = (x - np.mean(x)) / (np.std(x) + 1e-8)
         y_norm = (y - np.mean(y)) / (np.std(y) + 1e-8)
 
